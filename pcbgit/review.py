@@ -10,6 +10,8 @@ import re
 import subprocess
 import tempfile
 
+from .geometry import GERBER_EXTENSIONS, STEP_EXTENSIONS, compare_files
+
 
 class ReviewError(Exception):
     pass
@@ -146,6 +148,8 @@ def write_report(result: dict, output: Path) -> None:
              "<style>body{font:16px system-ui;max-width:1200px;margin:2rem auto;padding:0 1rem;color:#172033}section{border-top:1px solid #ccd;padding:1rem 0}.images{display:flex;gap:1rem;flex-wrap:wrap}.image{flex:1;min-width:280px}img{width:100%;background:white;border:1px solid #bbb}pre{white-space:pre-wrap;overflow-wrap:anywhere}.fail,.unknown{color:#a22}</style>",
              f"<h1>PCBGit review</h1><p>Status: <strong class='{esc(result['status'])}'>{esc(result['status'])}</strong></p>",
              f"<p>Base: {esc(result['base'])}<br>Head: {esc(result['head'])}</p>"]
+    for finding in result.get("findings", []):
+        parts.append(f"<p class='{esc(finding.get('status', ''))}'>{esc(finding.get('message', ''))}</p>")
     for item in result.get("files", []):
         parts.append(f"<section><h2>{esc(item['path'])}</h2><div class='images'>")
         for side in item.get("sides", []):
@@ -157,6 +161,8 @@ def write_report(result: dict, output: Path) -> None:
                     parts.append(f"<p><a href='{esc(artifact)}'>Download details</a></p>")
             for finding in side.get("findings", []):
                 parts.append(f"<p class='{esc(finding.get('status', ''))}'>{esc(finding.get('message', ''))}</p>")
+                if finding.get("evidence"):
+                    parts.append(f"<pre>{esc(json.dumps(finding['evidence'], indent=2, ensure_ascii=True))}</pre>")
             parts.append("</div>")
         parts.append("</div></section>")
     parts.append("<p><a href='report.json'>Machine-readable report</a></p></html>")
@@ -182,6 +188,21 @@ def review(repo: Path, base_ref: str, head_ref: str, output: Path) -> dict:
         changed = changed_files(repo, base_commit, head_commit)
         for name in changed:
             relative = PurePosixPath(name)
+            if relative.suffix.lower() in STEP_EXTENSIONS | GERBER_EXTENSIONS:
+                old = root / "base" / Path(*relative.parts)
+                new = root / "head" / Path(*relative.parts)
+                digest = hashlib.sha256(name.encode("utf-8", "surrogateescape")).hexdigest()[:16]
+                comparison = compare_files(old if old.is_file() else None, new if new.is_file() else None,
+                                           output / "assets" / digest / "comparison")
+                status = "pass" if comparison["status"] == "ok" else "unknown"
+                findings = [{**f, "status": status if f.get("severity") == "error" else "info"}
+                            for f in comparison["findings"]]
+                if status == "unknown":
+                    findings.append({"status": "unknown", "message": "Geometry comparison could not be completed."})
+                artifacts = [Path(p).relative_to(output).as_posix() for p in comparison["artifacts"]]
+                result["files"].append({"path": name, "kind": comparison["kind"], "change": comparison["change"],
+                                        "sides": [{"side": "comparison", "artifacts": artifacts, "findings": findings}]})
+                continue
             if relative.suffix.lower() not in (".kicad_pcb", ".kicad_sch"):
                 continue
             item = {"path": name, "sides": []}

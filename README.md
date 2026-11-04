@@ -4,6 +4,13 @@ PCBGit reviews hardware changes in Git. This first phase compares KiCad 9 PCB
 and schematic snapshots, renders SVGs, and runs the project's DRC and ERC rules.
 The checks do not replace fabrication review or guarantee manufacturability.
 
+Changed STEP and Gerber files also get standalone comparison viewers. Install
+the optional geometry dependencies on Python 3.12 or newer with
+`python -m pip install '.[geometry]'`. STEP solid differences are shown in red
+and green; cylindrical-hole matching is limited and reports ambiguity. Authored
+tolerances and GD&T are currently reported as unknown. Gerber overlays show
+revisions, not a calculated Boolean difference.
+
 Install Python 3.10 or newer, Git, and KiCad 9 with `kicad-cli` on `PATH`:
 
 ```sh

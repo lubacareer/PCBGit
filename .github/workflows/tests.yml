@@ -25,3 +25,5 @@ jobs:
         run: docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/workspace" pcbgit-ci review --base HEAD^ --head HEAD --skip-inventory --output /tmp/pcbgit-report
       - name: Exercise real KiCad exports and checks
         run: docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/workspace" --entrypoint /opt/pcbgit/bin/python pcbgit-ci -m unittest discover -s tests -p test_kicad_integration.py -v
+      - name: Exercise real KiCad multilayer export
+        run: docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/workspace" --entrypoint /opt/pcbgit/bin/python pcbgit-ci -m unittest discover -s tests -p test_core.py -v

@@ -12,6 +12,10 @@ license = {text = "Apache-2.0"}
 [project.scripts]
 pcbgit = "pcbgit.cli:main"
 
+[project.optional-dependencies]
+geometry = ["cadquery-ocp==7.9.3.1.1", "gerbonara==1.6.3"]
+test = ["pytest>=8,<10"]
+
 [tool.setuptools.packages.find]
 include = ["pcbgit*"]
 

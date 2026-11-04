@@ -7,6 +7,15 @@ Enabled inner copper layers are exported as separate, named SVGs for each
 reviewed revision. If layers cannot be determined or rendered, the report
 marks the comparison unknown.
 
+Changed STEP and Gerber files also get standalone comparison viewers. Install
+the optional geometry dependencies on Python 3.12 or newer with
+`python -m pip install '.[geometry]'`. STEP solid differences are shown in red
+and green; cylindrical-hole matching uses bounded face extents and reports
+ambiguity, including split faces. It does not prove hole design intent. Authored
+tolerances and GD&T are currently reported as unknown, so a STEP comparison
+returns an unknown verdict (exit 2) until they can be interpreted. Gerber overlays show
+revisions, not a calculated Boolean difference.
+
 Install Python 3.10 or newer, Git, and KiCad 9 with `kicad-cli` on `PATH`:
 
 ```sh
@@ -23,5 +32,7 @@ on root schematics; missing, cyclic or unsupported sheet references are reported
 as unknown rather than silently skipped. Git tree symlinks and submodules are rejected rather than followed. Reports and
 CAD files from untrusted sources should be viewed in an isolated environment.
 
-Run the tests with `python -m unittest discover -s tests`. Licensed under the
+Install test dependencies and run the full suite with
+`python -m pip install '.[geometry,test]'` and `python -m pytest -q` (Python
+3.12 or newer is required for geometry dependencies). Licensed under the
 Apache License 2.0; see [LICENSE](LICENSE).

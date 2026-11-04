@@ -135,8 +135,12 @@ class CoreTests(unittest.TestCase):
 
     def test_inner_copper_layers_are_exported_individually(self):
         board = self.root / "multi.kicad_pcb"
-        board.write_text('(kicad_pcb (layers (0 "F.Cu" signal) (1 "In1.Cu" power) '
-                         '(2 "In2.Cu" signal "Power Plane") (31 "B.Cu" signal)))', encoding="utf-8")
+        board.write_text('(kicad_pcb (layers (0 "F.Cu" signal) (4 "In1.Cu" power) '
+                         '(6 "In2.Cu" signal "Power Plane") (31 "B.Cu" signal)))', encoding="utf-8")
+        self.assertEqual(inner_copper_layers(board), ["In1.Cu", "In2.Cu"])
+        # The numeric ordinal is not necessarily the copper layer index.
+        board.write_text('(kicad_pcb (layers (1 "B.SilkS" user) (4 "In1.Cu" power "GND") '
+                         '(6 "In2.Cu" signal "Power Plane") (31 "B.Cu" signal)))', encoding="utf-8")
         self.assertEqual(inner_copper_layers(board), ["In1.Cu", "In2.Cu"])
         calls = []
         def fake_tool(args):
@@ -165,7 +169,7 @@ class CoreTests(unittest.TestCase):
 
     def test_inner_layer_parser_and_export_failure_report_unknown(self):
         board = self.root / "multi.kicad_pcb"
-        board.write_text('(kicad_pcb (layers (1 "In1.Cu" power)))', encoding="utf-8")
+        board.write_text('(kicad_pcb (layers (4 "In1.Cu" power)))', encoding="utf-8")
         def fake_tool(args):
             if "In1.Cu,Edge.Cuts" in args:
                 return 1, "failure"

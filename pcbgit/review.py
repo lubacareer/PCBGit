@@ -146,13 +146,20 @@ def inner_copper_layers(path: Path) -> list[str]:
     for entry in sections[0][1:]:
         if not isinstance(entry, list) or len(entry) < 2:
             raise ValueError("invalid board layer entry")
+        if len(entry) < 3 or not isinstance(entry[1], str):
+            raise ValueError("invalid board layer definition")
         try:
-            number = int(entry[0])
+            int(entry[0])
         except (TypeError, ValueError) as exc:
-            raise ValueError("invalid board layer number") from exc
-        # Canonical names remain accepted even when a layer has a custom name.
-        if 1 <= number <= 30:
-            inner.append(f"In{number}.Cu")
+            raise ValueError("invalid board layer ordinal") from exc
+        # The ordinal is stack ordering, not the copper index. KiCad's
+        # canonical name is the second item; a custom display name is optional
+        # and follows the layer type.
+        name = entry[1]
+        if re.fullmatch(r"In(?:[1-9]|[12][0-9]|30)\.Cu", name):
+            inner.append(name)
+        elif entry[2] in ("signal", "power", "mixed", "jumper") and name not in ("F.Cu", "B.Cu"):
+            raise ValueError(f"unsupported copper layer name: {name}")
     if len(inner) != len(set(inner)):
         raise ValueError("duplicate inner copper layer")
     return sorted(inner, key=lambda name: int(name[2:-3]))

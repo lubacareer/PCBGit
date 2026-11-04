@@ -182,6 +182,8 @@ def write_report(result: dict, output: Path) -> None:
              "<style>body{font:16px system-ui;max-width:1200px;margin:2rem auto;padding:0 1rem;color:#172033}section{border-top:1px solid #ccd;padding:1rem 0}.images{display:flex;gap:1rem;flex-wrap:wrap}.image{flex:1;min-width:280px}img{width:100%;background:white;border:1px solid #bbb}pre{white-space:pre-wrap;overflow-wrap:anywhere}.fail,.unknown{color:#a22}</style>",
              f"<h1>PCBGit review</h1><p>Status: <strong class='{esc(result['status'])}'>{esc(result['status'])}</strong></p>",
              f"<p>Base: {esc(result['base'])}<br>Head: {esc(result['head'])}</p>"]
+    for finding in result.get("findings", []):
+        parts.append(f"<p class='{esc(finding.get('status', ''))}'>{esc(finding.get('message', ''))}</p>")
     for item in result.get("files", []):
         parts.append(f"<section><h2>{esc(item['path'])}</h2><div class='images'>")
         for side in item.get("sides", []):

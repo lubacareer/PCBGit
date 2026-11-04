@@ -155,10 +155,11 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(json.loads((self.root / "report" / "report.json").read_text())["head"], result["head"])
 
     def test_report_escapes_untrusted_text(self):
-        result = {"status": "unknown", "base": "a", "head": "b", "files": [{"path": "<script>", "sides": []}]}
+        result = {"status": "unknown", "base": "a", "head": "b", "findings": [{"status": "unknown", "message": "<bad hierarchy>"}], "files": [{"path": "<script>", "sides": []}]}
         write_report(result, self.root / "report")
         page = (self.root / "report" / "index.html").read_text()
         self.assertIn("&lt;script&gt;", page)
+        self.assertIn("&lt;bad hierarchy&gt;", page)
         self.assertNotIn("<script>", page)
 
     def test_invalid_ref_fails(self):

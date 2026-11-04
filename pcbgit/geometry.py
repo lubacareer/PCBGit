@@ -123,48 +123,109 @@ def _bbox(shape):
 
 
 def _holes(shape):
-    from OCP.TopAbs import TopAbs_FACE, TopAbs_REVERSED
+    """Collect bounded full cylindrical interior faces as provisional holes.
+
+    Axial intervals use a canonical axis direction and world origin, so two
+    coaxial cavities at different depths remain distinguishable. This is a
+    face-level heuristic: even reversed cylindrical faces are not proof of a
+    design-intent hole, and split/open faces are reported as uncertain.
+    """
+    from OCP.TopAbs import TopAbs_FACE, TopAbs_REVERSED, TopAbs_SOLID
     from OCP.TopExp import TopExp_Explorer
     from OCP.TopoDS import TopoDS
     from OCP.BRepAdaptor import BRepAdaptor_Surface
+    from OCP.BRepTools import BRepTools
     from OCP.GeomAbs import GeomAbs_Cylinder
-    holes = []
-    explorer = TopExp_Explorer(shape, TopAbs_FACE)
-    while explorer.More():
-        face = TopoDS.Face_s(explorer.Current())
+    holes, uncertain = [], []
+    solid_explorer = TopExp_Explorer(shape, TopAbs_SOLID)
+    if not solid_explorer.More():
+        return [], [_finding("hole_face_unsupported", "The STEP model has no solid; cylindrical face classification is unsupported.", "warning", status="unknown")]
+
+    def solid_faces():
+        while solid_explorer.More():
+            faces = TopExp_Explorer(solid_explorer.Current(), TopAbs_FACE)
+            while faces.More():
+                yield TopoDS.Face_s(faces.Current())
+                faces.Next()
+            solid_explorer.Next()
+
+    for face in solid_faces():
         surface = BRepAdaptor_Surface(face)
         if surface.GetType() == GeomAbs_Cylinder and face.Orientation() == TopAbs_REVERSED:
+            u_min, u_max, v_min, v_max = BRepTools.UVBounds_s(face)
+            if (not all(math.isfinite(x) for x in (u_min, u_max, v_min, v_max))
+                    or abs((u_max - u_min) - 2 * math.pi) > 1e-5 or v_max <= v_min):
+                uncertain.append(_finding(
+                    "hole_face_unsupported", "A cylindrical interior face is open, split, or unbounded; its hole geometry cannot be matched reliably.",
+                    "warning", status="unknown", u_bounds=[x if math.isfinite(x) else None for x in (u_min, u_max)],
+                    v_bounds=[x if math.isfinite(x) else None for x in (v_min, v_max)]))
+                continue
             cylinder = surface.Cylinder()
             axis = cylinder.Axis()
             loc, direction = axis.Location(), axis.Direction()
             point = [float(loc.X()), float(loc.Y()), float(loc.Z())]
-            vector = [float(direction.X()), float(direction.Y()), float(direction.Z())]
+            original_vector = [float(direction.X()), float(direction.Y()), float(direction.Z())]
+            radius = float(cylinder.Radius())
+            if not all(math.isfinite(x) for x in (*point, *original_vector, radius)) or radius <= 0:
+                uncertain.append(_finding("hole_face_unsupported", "A cylindrical face has invalid axis or radius; its geometry cannot be matched reliably.", "warning", status="unknown"))
+                continue
+            vector = original_vector[:]
             # Canonical point on the infinite axis, independent of where its
             # STEP surface origin happens to lie. Flip equivalent directions.
             if next((v for v in vector if abs(v) > 1e-8), 1) < 0:
                 vector = [-v for v in vector]
             projection = sum(a * b for a, b in zip(point, vector))
             point = [round(a - projection * b, 5) for a, b in zip(point, vector)]
-            item = {"axis_point_mm": point, "axis_direction": [round(x, 6) for x in vector], "diameter_mm": round(2 * cylinder.Radius(), 5)}
-            if item not in holes:
-                holes.append(item)
-        explorer.Next()
-    return holes
+            direction_sign = sum(a * b for a, b in zip(vector, original_vector))
+            axial = sorted([projection + direction_sign * v_min, projection + direction_sign * v_max])
+            if not all(math.isfinite(x) for x in (*point, *axial, 2 * radius)):
+                uncertain.append(_finding("hole_face_unsupported", "A cylindrical face has non-finite axis bounds; its geometry cannot be matched reliably.", "warning", status="unknown"))
+                continue
+            holes.append({"axis_point_mm": point, "axis_direction": [round(x, 6) for x in vector],
+                          "diameter_mm": round(2 * radius, 5),
+                          "axis_interval_mm": [round(x, 5) for x in axial]})
+    return holes, uncertain
 
 
 def _hole_findings(old, new):
-    """Only pair a hole when it is the sole diameter/axis candidate both ways."""
+    """Match unchanged extents first, then report only unique plausible pairs."""
     def compatible(a, b):
         return abs(a["diameter_mm"] - b["diameter_mm"]) <= COMPARISON_TOLERANCE_MM and abs(sum(x*y for x,y in zip(a["axis_direction"], b["axis_direction"]))) > 0.99999
-    # Remove uniquely coincident holes first; otherwise an unchanged array of
-    # equal-diameter holes would be reported as ambiguous on every run.
-    exact_old = [[j for j, b in enumerate(new) if compatible(a, b) and math.dist(a["axis_point_mm"], b["axis_point_mm"]) <= COMPARISON_TOLERANCE_MM] for a in old]
-    exact_new = [[i for i, a in enumerate(old) if compatible(a, b) and math.dist(a["axis_point_mm"], b["axis_point_mm"]) <= COMPARISON_TOLERANCE_MM] for b in new]
+    def same_axis(a, b):
+        return compatible(a, b) and math.dist(a["axis_point_mm"], b["axis_point_mm"]) <= COMPARISON_TOLERANCE_MM
+    def same_extent(a, b):
+        return all(abs(x-y) <= COMPARISON_TOLERANCE_MM for x, y in zip(a["axis_interval_mm"], b["axis_interval_mm"]))
+
+    # Removing exact matches first prevents unchanged repeated holes from
+    # masking a separate removed or moved coaxial cavity.
+    exact_old = [[j for j, b in enumerate(new) if same_axis(a, b) and same_extent(a, b)] for a in old]
+    exact_new = [[i for i, a in enumerate(old) if same_axis(a, b) and same_extent(a, b)] for b in new]
     matched_old = {i for i, matches in enumerate(exact_old) if len(matches) == 1 and len(exact_new[matches[0]]) == 1}
     matched_new = {exact_old[i][0] for i in matched_old}
+    findings = []
+    # On the same axis, distinguish an extent change from a transverse move.
+    # Even unique matches are heuristic, so report them as unknown.
+    axial_old = [[j for j, b in enumerate(new) if j not in matched_new and same_axis(a, b)] for a in old]
+    axial_new = [[i for i, a in enumerate(old) if i not in matched_old and same_axis(a, b)] for b in new]
+    for i, a in enumerate(old):
+        if i in matched_old or len(axial_old[i]) != 1:
+            continue
+        j = axial_old[i][0]
+        if len(axial_new[j]) != 1:
+            continue
+        b = new[j]
+        old_start, old_end = a["axis_interval_mm"]
+        new_start, new_end = b["axis_interval_mm"]
+        if min(old_end, new_end) + COMPARISON_TOLERANCE_MM < max(old_start, new_start):
+            findings.append(_finding("hole_match_ambiguous", "Coaxial cylindrical faces occupy disjoint axial intervals; their relationship is unknown.", "warning", status="unknown", before=a, after=b))
+        elif abs((old_end-old_start) - (new_end-new_start)) > COMPARISON_TOLERANCE_MM:
+            findings.append(_finding("hole_depth_changed", "A uniquely matched cylindrical interior face has a changed axial extent; verify the cavity depth and design intent.", "warning", status="unknown", before=a, after=b, before_extent_mm=round(old_end-old_start, 5), after_extent_mm=round(new_end-new_start, 5)))
+        else:
+            findings.append(_finding("hole_axial_moved", "A uniquely matched cylindrical interior face appears to have moved along its axis; verify its identity.", "warning", status="unknown", before=a, after=b))
+        matched_old.add(i)
+        matched_new.add(j)
     candidates = [[j for j, b in enumerate(new) if j not in matched_new and compatible(a, b)] for a in old]
     reverse = [[i for i, a in enumerate(old) if i not in matched_old and compatible(a, b)] for b in new]
-    findings = []
     for i, a in enumerate(old):
         if i in matched_old:
             continue
@@ -172,7 +233,7 @@ def _hole_findings(old, new):
             b = new[candidates[i][0]]
             distance = math.dist(a["axis_point_mm"], b["axis_point_mm"])
             if distance > COMPARISON_TOLERANCE_MM:
-                findings.append(_finding("hole_moved", "A uniquely matched cylindrical interior face appears to have moved; verify the highlighted geometry.", "warning", before=a, after=b, axis_shift_mm=round(distance, 5)))
+                findings.append(_finding("hole_moved", "A uniquely matched cylindrical interior face appears to have moved; verify its identity and highlighted geometry.", "warning", status="unknown", before=a, after=b, axis_shift_mm=round(distance, 5)))
         elif candidates[i]:
             findings.append(_finding("hole_match_ambiguous", "Multiple cylindrical faces could match; a moved hole cannot be identified reliably.", "warning", status="unknown", before=a, candidate_count=len(candidates[i])))
         else:
@@ -218,8 +279,10 @@ def _compare_step(base, head, output_dir, result):
     old_box, new_box = (_bbox(s) if s else None for s in (old, new))
     result["findings"].append(_finding("step_bounds", "Model bounding boxes in millimeters; compare them to investigate dimensional changes.", before_mm=old_box, after_mm=new_box))
     result["findings"].append(_finding("step_tolerances_unknown", "Authored dimensional tolerances and GD&T were not interpreted; absent or unsupported metadata must not be treated as unchanged.", "warning", status="unknown", comparison_tolerance_mm=COMPARISON_TOLERANCE_MM))
-    result["findings"].append(_finding("hole_recognition_scope", "Hole recognition is limited to reversed cylindrical faces; blind holes, split faces and coincident or repeated diameters may be ambiguous. Coordinate positions are points on infinite axes, not hole depths.", "warning", status="unknown"))
-    old_holes, new_holes = (_holes(s) if s else [] for s in (old, new))
+    result["findings"].append(_finding("hole_recognition_scope", "Hole recognition uses full reversed cylindrical faces within solids as a heuristic; face orientation alone does not prove hole intent. Split faces, open shells and repeated geometry may be ambiguous. Axial extents are face bounds, not verified hole depths.", "warning", status="unknown"))
+    old_holes, old_uncertain = _holes(old) if old else ([], [])
+    new_holes, new_uncertain = _holes(new) if new else ([], [])
+    result["findings"].extend(old_uncertain + new_uncertain)
     result["findings"].extend(_hole_findings(old_holes, new_holes))
     def difference(a, b):
         if a is None:

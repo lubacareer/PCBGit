@@ -72,12 +72,14 @@ files in an isolated environment.
 ## Review coverage
 
 - **KiCad:** KiCad 9 renders changed `.kicad_pcb` and `.kicad_sch` files to
-  SVG for side-by-side review. It runs the project's DRC and ERC on head files.
+  SVG for side-by-side review, including a separately named SVG for each
+  enabled inner copper layer. It runs DRC and root-schematic ERC on head files.
 - **STEP:** `.step` and `.stp` solid models get an interactive offline 3D
   viewer, with removed geometry in red and added geometry in green. The report
-  includes bounding boxes and a conservative comparison of cylindrical
-  interior faces, with evidence and ambiguity warnings. Repeated, split, blind,
-  and other complex features may not be matched. Open-shell geometry may not
+  includes bounding boxes and a conservative comparison of bounded cylindrical
+  interior faces, with evidence and ambiguity warnings. A changed axial extent
+  can indicate a depth change, but does not prove design intent. Repeated,
+  split, and other complex features may not be matched. Open-shell geometry may not
   produce meaningful Boolean differences. Authored dimensional tolerances and
   GD&T are **always unknown**: they are not interpreted. The 0.01 mm feature
   matching tolerance is numerical and is not a design tolerance. Any changed
@@ -91,11 +93,16 @@ files in an isolated environment.
   [JLCPCB's rigid PCB capabilities](https://jlcpcb.com/capabilities/Capabilities?type=1).
   It checks track widths, nominal drilled hole and slot dimensions, and
   straight-track clearance between distinct known nets on the same layer.
-  Clearance for pads, vias, arcs, zones, same-net features and unknown nets,
+  Proximity involving unassigned nets, numerical errors, and exceeding the
+  clearance candidate limit are reported as unknown. Clearance for pads, vias,
+  arcs, zones and same-net features,
   finished dimensions, stack-up assumptions, and many other manufacturing
   rules are not checked. Review the profile and manufacturer capabilities
   before ordering. To customize it, copy the complete JSON profile into the
   reviewed repository, change the limits, commit it, and use `--profile`.
+  `min_slot_length_width_ratio` applies to plated slots; non-plated slots have
+  no default aspect-ratio rule. Projects may configure the optional positive
+  `min_nonplated_slot_length_width_ratio` for their fabricator.
 
 ## Distributor stock
 

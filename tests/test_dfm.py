@@ -8,6 +8,7 @@ from unittest.mock import patch
 import pytest
 
 from pcbgit.dfm import DEFAULT_PROFILE, _segment_distance, check_board
+from pcbgit.cli import main
 from pcbgit.review import review
 
 
@@ -58,6 +59,21 @@ def test_slots_and_custom_profile(tmp_path):
     assert sum(f["code"] == "slot_width" for f in result["findings"]) == 2
 
 
+def test_nonplated_slot_ratio_is_optional_and_validated(tmp_path):
+    target = board(tmp_path, '(footprint "X" (pad "" np_thru_hole oval (at 0 0) (size 3 3) (drill oval 1 1.5)))')
+    assert not any(f["code"] == "slot_ratio" for f in check_board(target)["findings"])
+    settings = json.loads(DEFAULT_PROFILE.read_text(encoding="utf-8"))
+    settings["min_nonplated_slot_length_width_ratio"] = 2
+    profile = tmp_path / "rules.json"
+    profile.write_text(json.dumps(settings), encoding="utf-8")
+    result = check_board(target, profile)
+    assert result["status"] == "failed"
+    assert next(f for f in result["findings"] if f["code"] == "slot_ratio")["minimum_ratio"] == 2
+    settings["min_nonplated_slot_length_width_ratio"] = True
+    profile.write_text(json.dumps(settings), encoding="utf-8")
+    assert check_board(target, profile)["status"] == "unknown"
+
+
 def test_clearance_numeric_overflow_fails_closed(tmp_path):
     # The segments cross, but naive cross products overflow to infinity and
     # can yield a huge apparent distance instead of reporting the violation.
@@ -98,6 +114,29 @@ def test_clearance_crossing_and_layer_and_net_exclusions(tmp_path):
     clearances = [f for f in result["findings"] if f["code"] == "track_clearance"]
     assert len(clearances) == 2
     assert all(f["actual_mm"] == 0 for f in clearances)
+
+
+@pytest.mark.parametrize("net_a,net_b", [(0, 1), (0, 0)])
+def test_clearance_with_unknown_net_is_not_silently_accepted(tmp_path, net_a, net_b):
+    target = board(tmp_path, '\n'.join([
+        _segment(0, 0, 2, 0, 0.2, "F.Cu", net_a),
+        _segment(1, -1, 1, 1, 0.2, "F.Cu", net_b),
+    ]))
+    result = check_board(target)
+    assert result["status"] == "unknown"
+    finding = next(f for f in result["findings"] if f["code"] == "track_clearance_unknown_net")
+    assert finding["status"] == "unknown"
+    assert finding["actual_mm"] == 0
+    assert not any(f["code"] == "track_clearance" for f in result["findings"])
+
+
+def test_well_separated_unknown_net_and_same_net_are_not_flagged(tmp_path):
+    target = board(tmp_path, '\n'.join([
+        _segment(0, 0, 2, 0, 0.2, "F.Cu", 0),
+        _segment(0, 1, 2, 1, 0.2, "F.Cu", 1),
+        _segment(0, 1, 2, 1, 0.2, "F.Cu", 1),
+    ]))
+    assert check_board(target)["status"] == "partial"
 
 
 def test_invalid_inputs_are_unknown(tmp_path):
@@ -157,7 +196,8 @@ def test_dense_candidate_limit_discloses_incomplete_coverage(tmp_path, monkeypat
     # the bound, preventing quadratic scans even when all exact checks skip.
     tracks = [_segment(0, 0, 1, 0, 0.2, "F.Cu", 1) for _ in range(10)]
     result = check_board(board(tmp_path, "\n".join(tracks)))
-    assert result["status"] == "partial"
+    assert result["status"] == "unknown"
+    assert next(f for f in result["findings"] if f["code"] == "dfm_clearance_candidate_limit")["status"] == "unknown"
     assert any("clearance incomplete" in item for item in result["unsupported"])
 
 
@@ -218,6 +258,47 @@ def test_review_reports_clearance_numeric_error_as_unknown(tmp_path):
     assert result["status"] == "unknown"
     findings = result["files"][0]["sides"][-1]["findings"]
     assert next(f for f in findings if f.get("code") == "dfm_clearance_numeric_unknown")["status"] == "unknown"
+
+
+@pytest.mark.parametrize("scenario,expected_exit", [("cap", 2), ("cap_mixed", 1), ("mixed", 1), ("net_zero", 2)])
+def test_cli_propagates_clearance_unknown_and_known_failures(tmp_path, monkeypatch, scenario, expected_exit):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    def git(*args):
+        return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True, timeout=30).stdout.strip()
+    git("init")
+    git("config", "user.email", "test@example.invalid")
+    git("config", "user.name", "Test")
+    target = repo / "board.kicad_pcb"
+    target.write_text('(kicad_pcb)', encoding="utf-8")
+    git("add", ".")
+    git("commit", "-m", "base")
+    base = git("rev-parse", "HEAD")
+    if scenario in ("cap", "cap_mixed"):
+        monkeypatch.setattr("pcbgit.dfm._MAX_CLEARANCE_CANDIDATES", 1)
+        tracks = [_segment(0, 0, 1, 0, 0.2, "F.Cu", 1) for _ in range(3)]
+        if scenario == "cap_mixed":
+            tracks.append(_segment(0, 10, 1, 10, 0.05, "F.Cu", 2))
+        unknown_code = "dfm_clearance_candidate_limit"
+    elif scenario == "net_zero":
+        tracks = [_segment(0, 0, 1, 0, 0.2, "F.Cu", 0), _segment(0, 0.1, 1, 0.1, 0.2, "F.Cu", 1)]
+        unknown_code = "track_clearance_unknown_net"
+    else:
+        tracks = [_segment(-1e201, 2e200, 7e200, -1e200, 0.2, "F.Cu", 1),
+                  _segment(-9e200, -3e200, 6e200, 7e200, 0.2, "F.Cu", 2),
+                  _segment(0, 3e201, 1, 3e201, 0.05, "F.Cu", 3)]
+        unknown_code = "dfm_clearance_numeric_unknown"
+    target.write_text('(kicad_pcb ' + ' '.join(tracks) + ')', encoding="utf-8")
+    git("commit", "-am", "change")
+    output = tmp_path / "report"
+    with patch("pcbgit.review.run_tool", return_value=(0, "9.0.9")), patch("pcbgit.review.kicad_file", return_value={"side": "head", "artifacts": [], "findings": []}):
+        code = main(["review", "--repo", str(repo), "--base", base, "--output", str(output)])
+    assert code == expected_exit
+    result = json.loads((output / "report.json").read_text(encoding="utf-8"))
+    findings = result["files"][0]["sides"][-1]["findings"]
+    assert next(f for f in findings if f.get("code") == unknown_code)["status"] == "unknown"
+    if scenario in ("mixed", "cap_mixed"):
+        assert next(f for f in findings if f.get("code") == "track_width")["status"] == "fail"
 
 
 def test_review_fails_on_dfm_violation(tmp_path):

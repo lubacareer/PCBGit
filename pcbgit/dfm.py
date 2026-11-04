@@ -182,18 +182,18 @@ def check_board(board: Path, profile: Path | None = None) -> dict:
     """Check supported nominal PCB geometry against a JSON manufacturing profile.
 
     Status is ``failed`` for a violation, ``partial`` when checks have coverage
-    gaps, and ``unknown`` when input or configuration cannot be read. A partial
+    gaps, and ``unknown`` when an evaluated check cannot be verified. A partial
     result must not be interpreted as proof that a board is manufacturable.
     """
     findings: list[dict] = []
     unsupported = [
         "Copper clearance for pads, vias, arcs, zones and other copper objects",
-        "Same-net manufacturing clearance and unknown-net clearance",
+        "Same-net manufacturing clearance",
         "Finished hole dimensions, stack-up assumptions and all other fabrication rules",
     ]
     result = {"status": "unknown", "findings": findings, "supported": [
         "Straight and arc track widths", "Nominal via, plated and non-plated hole and slot dimensions",
-        "Straight-track clearance on the same layer for distinct known nets",
+        "Straight-track clearance on the same layer for distinct known nets; unknown-net proximity is flagged for review",
     ], "unsupported": unsupported, "profile": None}
     try:
         settings = json.loads((profile or DEFAULT_PROFILE).read_text(encoding="utf-8"))
@@ -204,6 +204,15 @@ def check_board(board: Path, profile: Path | None = None) -> dict:
             if value <= 0:
                 raise ValueError(f"{key} must be positive")
             settings[key] = value
+        optional_ratio = "min_nonplated_slot_length_width_ratio"
+        if optional_ratio in settings:
+            raw = settings[optional_ratio]
+            if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+                raise ValueError(f"{optional_ratio} must be a JSON number")
+            ratio = _number(raw)
+            if ratio <= 0:
+                raise ValueError(f"{optional_ratio} must be positive")
+            settings[optional_ratio] = ratio
         root = _parse(Path(board).read_text(encoding="utf-8-sig"))
         if not root or root[0] != "kicad_pcb":
             raise ValueError("not a KiCad PCB S-expression")
@@ -260,11 +269,13 @@ def check_board(board: Path, profile: Path | None = None) -> dict:
                     violation("slot_width" if slot else "hole_diameter",
                               "Nominal hole or slot width is below profile minimum", diameter,
                               settings[key], hole_type="via" if item[0] == "via" else item[2])
-                if slot and plated and max(dimensions) / diameter < settings["min_slot_length_width_ratio"]:
+                ratio_limit = (settings["min_slot_length_width_ratio"] if plated else
+                               settings.get("min_nonplated_slot_length_width_ratio"))
+                if slot and ratio_limit is not None and max(dimensions) / diameter < ratio_limit:
                     findings.append({"code": "slot_ratio", "severity": "error",
-                        "message": "Plated slot length-to-width ratio is below profile minimum",
+                        "message": f"{'Plated' if plated else 'Non-plated'} slot length-to-width ratio is below profile minimum",
                         "actual_ratio": round(max(dimensions) / diameter, 6),
-                        "minimum_ratio": settings["min_slot_length_width_ratio"]})
+                        "minimum_ratio": ratio_limit})
         except (ValueError, IndexError, TypeError, OverflowError) as exc:
             findings.append({"code": "dfm_unsupported_item", "severity": "warning",
                              "message": f"Could not inspect {item[0]}: {exc}"})
@@ -276,9 +287,8 @@ def check_board(board: Path, profile: Path | None = None) -> dict:
     # and disclose any unfinished coverage.
     layers: dict[str, list[tuple]] = {}
     numeric_unknown = False
+    unknown_net = False
     for track in tracks:
-        if track["net"] == "0":
-            continue
         try:
             radius = _finite(_finite(track["width"] + settings["min_track_clearance_mm"]) / 2)
             a, b = track["a"], track["b"]
@@ -304,7 +314,7 @@ def check_board(board: Path, profile: Path | None = None) -> dict:
                     limited = True
                     break
                 first, second = old[4], current[4]
-                if first["net"] == second["net"]:
+                if first["net"] == second["net"] and first["net"] != "0":
                     continue
                 try:
                     distance = _segment_distance(first["a"], first["b"], second["a"], second["b"])
@@ -314,9 +324,16 @@ def check_board(board: Path, profile: Path | None = None) -> dict:
                     numeric_unknown = True
                     continue
                 if clearance + 1e-9 < settings["min_track_clearance_mm"]:
-                    violation("track_clearance", "Copper clearance between distinct-net tracks is below profile minimum",
-                              clearance, settings["min_track_clearance_mm"], layer=first["layer"],
-                              start_a=list(first["a"]), start_b=list(second["a"]))
+                    if "0" in (first["net"], second["net"]):
+                        unknown_net = True
+                        findings.append({"code": "track_clearance_unknown_net", "severity": "warning", "status": "unknown",
+                                         "message": "Track clearance is below profile minimum but an unassigned net makes connectivity uncertain",
+                                         "actual_mm": round(clearance, 6), "minimum_mm": settings["min_track_clearance_mm"],
+                                         "layer": first["layer"], "start_a": list(first["a"]), "start_b": list(second["a"])})
+                    else:
+                        violation("track_clearance", "Copper clearance between distinct-net tracks is below profile minimum",
+                                  clearance, settings["min_track_clearance_mm"], layer=first["layer"],
+                                  start_a=list(first["a"]), start_b=list(second["a"]))
             if limited:
                 break
             key = (current[2], index)
@@ -326,10 +343,12 @@ def check_board(board: Path, profile: Path | None = None) -> dict:
             break
     if limited:
         unsupported.append("Straight-track clearance incomplete: candidate limit exceeded")
+        findings.append({"code": "dfm_clearance_candidate_limit", "severity": "warning", "status": "unknown",
+                         "message": "Straight-track clearance could not be fully verified because the candidate limit was exceeded"})
     if numeric_unknown:
         unsupported.append("Straight-track clearance incomplete: non-finite geometry calculation")
-        findings.append({"code": "dfm_clearance_numeric_unknown", "severity": "error",
+        findings.append({"code": "dfm_clearance_numeric_unknown", "severity": "error", "status": "unknown",
                          "message": "Straight-track clearance could not be verified because a geometry calculation overflowed or underflowed"})
     has_violation = any(f["severity"] == "error" and f["code"] != "dfm_clearance_numeric_unknown" for f in findings)
-    result["status"] = "failed" if has_violation else "unknown" if numeric_unknown else "partial"
+    result["status"] = "failed" if has_violation else "unknown" if numeric_unknown or limited or unknown_net else "partial"
     return result

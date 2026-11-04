@@ -11,7 +11,7 @@ def main(argv=None):
     commands = parser.add_subparsers(dest="command", required=True)
     cmd = commands.add_parser("review", help="Compare a merge base to a commit and run checks")
     cmd.add_argument("--repo", type=Path, default=Path.cwd())
-    cmd.add_argument("--base", required=True, help="Base Git revision")
+    cmd.add_argument("--base", required=True, help="Base Git revision, or :empty: for an initial commit")
     cmd.add_argument("--head", default="HEAD", help="Head Git revision")
     cmd.add_argument("--output", type=Path, default=Path("pcbgit-report"))
     cmd.add_argument("--profile", help="Repository-relative JSON DFM profile at the head revision")

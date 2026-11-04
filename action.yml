@@ -19,6 +19,9 @@ inputs:
   profile:
     description: Optional DFM profile path
     default: ''
+  image:
+    description: Optional trusted, prebuilt PCBGit image pinned by sha256 digest
+    default: ''
   digikey-client-id:
     description: DigiKey OAuth client ID
     default: ''
@@ -46,6 +49,7 @@ runs:
         PCB_BOM: ${{ inputs.bom }}
         PCB_BUILD_QUANTITY: ${{ inputs.build-quantity }}
         PCB_PROFILE: ${{ inputs.profile }}
+        PCB_IMAGE: ${{ inputs.image }}
         PCB_EVENT: ${{ github.event_name }}
         PCB_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
         PCB_REPO: ${{ github.repository }}
@@ -60,7 +64,17 @@ runs:
           echo 'PCBGit refuses pull_request_target; use pull_request without secrets for forks.' >&2
           exit 2
         fi
-        docker build -t pcbgit-action "$GITHUB_ACTION_PATH"
+        if [[ -n "$PCB_IMAGE" ]]; then
+          if [[ ! "$PCB_IMAGE" =~ ^[a-zA-Z0-9][a-zA-Z0-9._:/-]*@sha256:[a-f0-9]{64}$ ]]; then
+            echo 'PCBGit image must be a trusted immutable sha256 reference.' >&2
+            exit 2
+          fi
+          docker pull "$PCB_IMAGE"
+          image="$PCB_IMAGE"
+        else
+          docker build -t pcbgit-action "$GITHUB_ACTION_PATH"
+          image=pcbgit-action
+        fi
         args=(review --base "$PCB_BASE" --head "$PCB_HEAD" --output "$PCB_OUTPUT" --build-quantity "$PCB_BUILD_QUANTITY")
         [[ -z "$PCB_BOM" ]] || args+=(--bom "$PCB_BOM")
         [[ -z "$PCB_PROFILE" ]] || args+=(--profile "$PCB_PROFILE")
@@ -70,4 +84,4 @@ runs:
         else
           args+=(--skip-inventory)
         fi
-        docker run --rm --user "$(id -u):$(id -g)" -v "$GITHUB_WORKSPACE:/workspace" -w /workspace "${docker_env[@]}" pcbgit-action "${args[@]}"
+        docker run --rm --user "$(id -u):$(id -g)" -v "$GITHUB_WORKSPACE:/workspace" -w /workspace "${docker_env[@]}" "$image" "${args[@]}"

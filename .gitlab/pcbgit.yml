@@ -12,7 +12,25 @@ pcbgit-review:
     - |
       set -eu
       base="${CI_MERGE_REQUEST_DIFF_BASE_SHA:-}"
-      if [ -z "$base" ]; then base="$(git rev-parse HEAD^)"; fi
+      before="${CI_COMMIT_BEFORE_SHA:-}"
+      if [ -z "$base" ] && [ -n "$before" ] && [ "$before" != "0000000000000000000000000000000000000000" ]; then
+        if ! git cat-file -e "${before}^{commit}" 2>/dev/null; then
+          echo 'PCBGit cannot access CI_COMMIT_BEFORE_SHA; fetch the prior commit and retry.' >&2
+          exit 2
+        fi
+        base="$before"
+      fi
+      if [ -z "$base" ]; then
+        if [ -n "${CI_DEFAULT_BRANCH:-}" ] && [ "${CI_COMMIT_BRANCH:-}" != "${CI_DEFAULT_BRANCH}" ]; then
+          git check-ref-format "refs/remotes/origin/${CI_DEFAULT_BRANCH}" >/dev/null
+          if ! git show-ref --verify --quiet "refs/remotes/origin/${CI_DEFAULT_BRANCH}"; then
+            git fetch --no-tags origin "+refs/heads/${CI_DEFAULT_BRANCH}:refs/remotes/origin/${CI_DEFAULT_BRANCH}"
+          fi
+          base="refs/remotes/origin/${CI_DEFAULT_BRANCH}"
+        else
+          base=':empty:'
+        fi
+      fi
       set -- review --base "$base" --head "$CI_COMMIT_SHA" --output pcbgit-report --build-quantity "${PCBGIT_BUILD_QUANTITY:-1}"
       if [ -n "${PCBGIT_BOM:-}" ]; then set -- "$@" --bom "$PCBGIT_BOM"; fi
       if [ -n "${PCBGIT_PROFILE:-}" ]; then set -- "$@" --profile "$PCBGIT_PROFILE"; fi

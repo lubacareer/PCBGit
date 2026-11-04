@@ -155,6 +155,18 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(result["status"], "unknown")
         self.assertEqual(json.loads((self.root / "report" / "report.json").read_text())["head"], result["head"])
 
+    def test_empty_baseline_marks_head_files_as_added(self):
+        calls = []
+        def fake_kicad(path, name, output, side, check):
+            calls.append((name, side, check))
+            return {"side": side, "artifacts": [], "findings": []}
+        with patch("pcbgit.review.run_tool", return_value=(0, "9.0.9")), \
+             patch("pcbgit.review.kicad_file", side_effect=fake_kicad), \
+             patch("pcbgit.review.check_board", return_value={"status": "partial", "profile": None, "supported": [], "unsupported": [], "findings": []}):
+            result = review(self.repo, ":empty:", "HEAD", self.root / "report", skip_inventory=True)
+        self.assertEqual(result["base"], ":empty:")
+        self.assertEqual(calls, [("board.kicad_pcb", "head", True)])
+
     def test_report_escapes_untrusted_text(self):
         result = {"status": "unknown", "base": "a", "head": "b", "findings": [{"status": "unknown", "message": "<bad hierarchy>"}], "files": [{"path": "<script>", "sides": []}]}
         write_report(result, self.root / "report")
@@ -206,9 +218,46 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(result["status"], "pass")
             self.assertEqual(result["inventory"]["findings"][0]["quantity"], 4)
             missing = review(self.repo, self.base, "HEAD", self.root / "report2", bom="missing.csv")
-            self.assertEqual(missing["status"], "fail")
+            self.assertEqual(missing["status"], "unknown")
             skipped = review(self.repo, self.base, "HEAD", self.root / "report3", skip_inventory=True)
             self.assertEqual(skipped["inventory"]["status"], "skipped")
+
+    def test_hierarchical_bom_exports_root_and_checks_stock(self):
+        (self.repo / "root.kicad_sch").write_text('(kicad_sch (sheet (property "Sheetfile" "child.kicad_sch")))')
+        (self.repo / "child.kicad_sch").write_text('(kicad_sch)')
+        self.git("add", "root.kicad_sch", "child.kicad_sch")
+        self.git("commit", "-m", "add hierarchy")
+        calls = []
+        def tool(args):
+            calls.append(args)
+            if args[1:4] == ["sch", "export", "bom"]:
+                Path(args[args.index("--output") + 1]).write_text("Refs,Qty,DNP,DigiKey,Mouser\nR1,1,,DK1,\n")
+            return 0, "9.0.9"
+        with patch("pcbgit.review.run_tool", side_effect=tool), \
+             patch("pcbgit.review.kicad_file", side_effect=lambda path, name, output, side, check: {"side": side, "artifacts": [], "findings": []}), \
+             patch("pcbgit.review.check_board", return_value={"status": "partial", "profile": None, "supported": [], "unsupported": [], "findings": []}), \
+             patch("pcbgit.inventory._digikey", return_value=(1, "exact")):
+            result = review(self.repo, self.base, "HEAD", self.root / "report")
+        exports = [args for args in calls if args[1:4] == ["sch", "export", "bom"]]
+        self.assertEqual(len(exports), 1)
+        self.assertEqual(Path(exports[0][-1]).name, "root.kicad_sch")
+        self.assertEqual(result["inventory"]["status"], "pass")
+
+    def test_auto_bom_missing_tool_or_export_is_unknown(self):
+        (self.repo / "root.kicad_sch").write_text('(kicad_sch)')
+        self.git("add", "root.kicad_sch")
+        self.git("commit", "-m", "add schematic")
+        with patch("pcbgit.review.run_tool", return_value=(None, "missing")), \
+             patch("pcbgit.review.kicad_file", side_effect=lambda path, name, output, side, check: {"side": side, "artifacts": [], "findings": []}), \
+             patch("pcbgit.review.check_board", return_value={"status": "partial", "profile": None, "supported": [], "unsupported": [], "findings": []}):
+            result = review(self.repo, self.base, "HEAD", self.root / "report")
+        self.assertEqual(result["status"], "unknown")
+        self.assertEqual(result["inventory"]["status"], "unknown")
+        with patch("pcbgit.review.run_tool", side_effect=lambda args: (1, "failed") if args[1:4] == ["sch", "export", "bom"] else (0, "9.0.9")), \
+             patch("pcbgit.review.kicad_file", side_effect=lambda path, name, output, side, check: {"side": side, "artifacts": [], "findings": []}), \
+             patch("pcbgit.review.check_board", return_value={"status": "partial", "profile": None, "supported": [], "unsupported": [], "findings": []}):
+            result = review(self.repo, self.base, "HEAD", self.root / "report2")
+        self.assertEqual(result["status"], "unknown")
 
 
 if __name__ == "__main__":

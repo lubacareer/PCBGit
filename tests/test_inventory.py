@@ -49,12 +49,21 @@ class InventoryTests(unittest.TestCase):
         self.write("R1,1,,,\n")
         self.assertEqual(check_inventory(self.bom)["status"], "fail")
         self.write("R1,abc,dk1,,\n")
-        self.assertEqual(check_inventory(self.bom)["status"], "fail")
+        self.assertEqual(check_inventory(self.bom)["status"], "unknown")
         self.assertEqual(check_inventory(self.bom, skip=True)["status"], "skipped")
 
     def test_excludes_dnp_and_rejects_empty_bom(self):
         self.write("R1,1,,,yes\n")
-        self.assertEqual(check_inventory(self.bom)["status"], "fail")
+        self.assertEqual(check_inventory(self.bom)["status"], "unknown")
+
+    def test_invalid_configuration_and_missing_references_are_unknown(self):
+        self.write("R1,1,dk1,,\n")
+        self.assertEqual(check_inventory(self.bom, 0)["status"], "unknown")
+        self.assertEqual(check_inventory(self.bom, True, skip=True)["status"], "unknown")
+        self.bom.write_text("Qty,DigiKey\n1,dk1\n", encoding="utf-8")
+        self.assertEqual(check_inventory(self.bom)["status"], "unknown")
+        self.write(",1,dk1,,\n")
+        self.assertEqual(check_inventory(self.bom)["status"], "unknown")
 
     def test_digikey_requires_exact_package_match(self):
         response = {"Product": {"ProductVariations": [{"DigiKeyProductNumber": "SKU-A", "QuantityAvailableforPackageType": 7}]}}

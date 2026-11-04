@@ -36,6 +36,9 @@ the local repository; fetch full history in CI:
 pcbgit review --base origin/main --head HEAD --output pcbgit-report
 ```
 
+Use `--base :empty:` to review every tracked file as newly added, including
+on the first commit of a repository.
+
 The tool compares the merge base of `--base` and `--head` with `--head` and
 checks all KiCad files at the head revision, including unchanged ones. It reads
 committed Git objects, not uncommitted working-tree changes. Open
@@ -104,12 +107,12 @@ gate unless the other distributor verifies enough stock. Confirmed shortages
 also fail. This is a point-in-time result, not a reservation or a guarantee
 that stock will remain available.
 
-When the head revision contains exactly one `.kicad_sch` file, PCBGit asks
-KiCad to export its BOM automatically using `DigiKey` and `Mouser` symbol
-fields, excluding DNP components. With zero or multiple schematic files,
+When the head revision contains exactly one root schematic, PCBGit asks
+KiCad to export its hierarchical BOM automatically using `DigiKey` and `Mouser`
+symbol fields, excluding DNP components. With zero or multiple root schematics,
 commit a KiCad-exported CSV and select it with `--bom`; use this option as
 well if your project needs a particular BOM export. The accepted CSV has a
-reference column, positive integer `Qty` or `Quantity`, and distributor SKU
+nonempty reference column, positive integer `Qty` or `Quantity`, and distributor SKU
 columns, for example:
 
 ```csv
@@ -177,6 +180,10 @@ fork workflows unprivileged; do not pass secrets to them or run local action
 code from the PR checkout. The stock check must be run separately in a trusted,
 credentialed context. Pin and periodically review all third-party actions.
 
+To avoid rebuilding the image on every GitHub-hosted run, build and publish a
+trusted PCBGit image and set the action's optional `image` input to its immutable
+`registry/name@sha256:<digest>` reference. Without it the action builds locally.
+
 ## GitLab CI
 
 Build and publish the Docker image from a trusted PCBGit revision to a registry
@@ -200,6 +207,10 @@ fork pipelines: a job script cannot enforce that boundary after variables have
 already been injected. The template skips inventory on fork merge requests;
 perform stock verification separately in a trusted pipeline with credentials.
 It saves `pcbgit-report/` as an artifact even when the job fails.
+Push pipelines compare against `CI_COMMIT_BEFORE_SHA`, including all commits in
+the push. A new non-default branch compares against the default branch. A first
+default-branch push uses an empty baseline; missing prior commit objects fail
+explicitly instead of silently reviewing only the tip commit.
 
 ## Development
 

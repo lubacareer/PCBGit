@@ -61,6 +61,14 @@ class KiCadIntegrationTest(unittest.TestCase):
                 self.assertEqual(check[0]["status"], "pass", check)
                 self.assertIsInstance(check[0]["details"], dict)
                 self.assertTrue(any((output / path).is_file() and path.endswith(".json") for path in sides["head"]["artifacts"]))
+            # This schematic has no populated components. The default strict
+            # gate must run and return unknown rather than silently passing.
+            default_output = root / "default-report"
+            code = main(["review", "--repo", str(repo), "--base", base,
+                         "--head", "HEAD", "--output", str(default_output)])
+            default = json.loads((default_output / "report.json").read_text(encoding="utf-8"))
+            self.assertEqual(code, 2, default)
+            self.assertEqual(default["inventory"]["status"], "unknown")
 
 
 if __name__ == "__main__":

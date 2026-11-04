@@ -110,13 +110,17 @@ def _read_bom(path: Path) -> list[dict]:
         names = [name.strip().casefold() for name in reader.fieldnames]
         if len(set(names)) != len(names):
             raise ValueError("BOM contains duplicate columns")
+        if not {"reference", "references", "ref", "refs"}.intersection(names):
+            raise ValueError("BOM has no reference column")
         for index, raw in enumerate(reader, start=2):
             if None in raw:
                 raise ValueError(f"BOM row {index} has too many fields")
             row = {key.strip().casefold(): value for key, value in raw.items()}
             if _column(row, "dnp", "do not populate").casefold() in {"yes", "true", "1", "dnp"} or _column(row, "in bom", "in_bom").casefold() in {"no", "false", "0"}:
                 continue
-            ref = _column(row, "reference", "references", "ref", "refs") or f"row {index}"
+            ref = _column(row, "reference", "references", "ref", "refs")
+            if not ref:
+                raise ValueError(f"BOM row {index} has a missing reference")
             qty = _column(row, "quantity", "qty")
             if not re.fullmatch(r"[1-9][0-9]*", qty):
                 raise ValueError(f"BOM row {index} has a missing or invalid quantity")
@@ -132,14 +136,14 @@ def check_inventory(bom: Path, build_quantity: int = 1, skip: bool = False) -> d
     CSV columns are Reference, Qty, DigiKey and Mouser (SKU aliases accepted).
     The same SKU appearing on multiple rows is conservatively counted together.
     """
+    if isinstance(build_quantity, bool) or not isinstance(build_quantity, int) or build_quantity < 1:
+        return {"status": "unknown", "findings": [{"status": "unknown", "message": "Build quantity must be a positive integer"}]}
     if skip:
         return {"status": "skipped", "findings": [{"status": "skipped", "message": "Inventory verification skipped for an untrusted pull request"}]}
-    if isinstance(build_quantity, bool) or not isinstance(build_quantity, int) or build_quantity < 1:
-        return {"status": "fail", "findings": [{"status": "unknown", "message": "Build quantity must be a positive integer"}]}
     try:
         parts = _read_bom(Path(bom))
     except (OSError, ValueError, csv.Error, UnicodeError, TypeError):
-        return {"status": "fail", "findings": [{"status": "unknown", "message": "BOM is missing, empty, or invalid; see the documented CSV format"}]}
+        return {"status": "unknown", "findings": [{"status": "unknown", "message": "BOM is missing, empty, or invalid; see the documented CSV format"}]}
     totals: dict[tuple[str, str], int] = defaultdict(int)
     for part in parts:
         for distributor in ("digikey", "mouser"):

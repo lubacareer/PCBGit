@@ -60,6 +60,23 @@ class GitLabTemplateTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("cannot access", result.stderr)
 
+    def test_non_fast_forward_push_fails_explicitly(self):
+        result = self.run_template(CI_COMMIT_BEFORE_SHA=self.head, CI_COMMIT_SHA=self.first)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("non-fast-forward", result.stderr)
+
+    def test_new_branch_refreshes_default_branch(self):
+        remote = self.root / "remote.git"
+        subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True, timeout=30)
+        self.git("remote", "add", "origin", str(remote))
+        self.git("push", "origin", "main")
+        self.git("update-ref", "refs/remotes/origin/main", self.first)
+        result = self.run_template(CI_COMMIT_BEFORE_SHA="0" * 40, CI_COMMIT_BRANCH="feature")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.git("rev-parse", "refs/remotes/origin/main"), self.head)
+        args = self.capture.read_text().splitlines()
+        self.assertEqual(args[args.index("--base") + 1], "refs/remotes/origin/main")
+
     def test_fork_does_not_pass_credentials(self):
         result = self.run_template(CI_PIPELINE_SOURCE="merge_request_event", CI_MERGE_REQUEST_DIFF_BASE_SHA=self.first,
                                    CI_MERGE_REQUEST_SOURCE_PROJECT_ID="2", CI_MERGE_REQUEST_TARGET_PROJECT_ID="1",

@@ -18,14 +18,16 @@ pcbgit-review:
           echo 'PCBGit cannot access CI_COMMIT_BEFORE_SHA; fetch the prior commit and retry.' >&2
           exit 2
         fi
+        if ! git merge-base --is-ancestor "$before" "$CI_COMMIT_SHA"; then
+          echo 'PCBGit cannot review a non-fast-forward push using a merge-base; run an explicit comparison.' >&2
+          exit 2
+        fi
         base="$before"
       fi
       if [ -z "$base" ]; then
         if [ -n "${CI_DEFAULT_BRANCH:-}" ] && [ "${CI_COMMIT_BRANCH:-}" != "${CI_DEFAULT_BRANCH}" ]; then
           git check-ref-format "refs/remotes/origin/${CI_DEFAULT_BRANCH}" >/dev/null
-          if ! git show-ref --verify --quiet "refs/remotes/origin/${CI_DEFAULT_BRANCH}"; then
-            git fetch --no-tags origin "+refs/heads/${CI_DEFAULT_BRANCH}:refs/remotes/origin/${CI_DEFAULT_BRANCH}"
-          fi
+          git fetch --no-tags origin "+refs/heads/${CI_DEFAULT_BRANCH}:refs/remotes/origin/${CI_DEFAULT_BRANCH}"
           base="refs/remotes/origin/${CI_DEFAULT_BRANCH}"
         else
           base=':empty:'

@@ -208,9 +208,10 @@ already been injected. The template skips inventory on fork merge requests;
 perform stock verification separately in a trusted pipeline with credentials.
 It saves `pcbgit-report/` as an artifact even when the job fails.
 Push pipelines compare against `CI_COMMIT_BEFORE_SHA`, including all commits in
-the push. A new non-default branch compares against the default branch. A first
-default-branch push uses an empty baseline; missing prior commit objects fail
-explicitly instead of silently reviewing only the tip commit.
+the push. A new non-default branch fetches and compares against the default
+branch. When a default-branch pipeline has no prior commit, it uses an empty
+baseline. Missing prior commits or non-fast-forward pushes fail explicitly
+instead of silently reviewing an incomplete range.
 
 ## Development
 

@@ -1,0 +1,11 @@
+(kicad_sch
+  (version 20250114)
+  (generator "pcbgit-fixture")
+  (uuid 3fca966a-6614-4ae9-bf50-2d312929280c)
+  (paper "A4")
+  (lib_symbols)
+  (text "Changed schematic" (at 80 60 0)
+    (effects (font (size 1.27 1.27)))
+    (uuid 0fd9b276-2b28-455e-81d0-8c57d97ed228))
+  (sheet_instances (path "/" (page "1")))
+)

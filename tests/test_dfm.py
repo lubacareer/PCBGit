@@ -267,7 +267,7 @@ def test_review_reports_clearance_numeric_error_as_unknown(tmp_path):
                       '(segment (start -9e200 -3e200) (end 6e200 7e200) (width 0.2) (layer "F.Cu") (net 2)))')
     git("commit", "-am", "after")
     with patch("pcbgit.review.run_tool", return_value=(0, "9.0.9")), patch("pcbgit.review.kicad_file", return_value={"side": "head", "artifacts": [], "findings": []}):
-        result = review(repo, base, "HEAD", tmp_path / "report")
+        result = review(repo, base, "HEAD", tmp_path / "report", skip_inventory=True)
     assert result["status"] == "unknown"
     findings = result["files"][0]["sides"][-1]["findings"]
     assert next(f for f in findings if f.get("code") == "dfm_clearance_numeric_unknown")["status"] == "unknown"
@@ -334,7 +334,7 @@ def test_review_fails_on_dfm_violation(tmp_path):
                       '(segment (start 0 1) (end 1 1) (layer "F.Cu") (net 2)))')
     git("commit", "-am", "after")
     with patch("pcbgit.review.run_tool", return_value=(0, "9.0.9")), patch("pcbgit.review.kicad_file", return_value={"side": "head", "artifacts": [], "findings": []}):
-        result = review(repo, base, "HEAD", tmp_path / "report")
+        result = review(repo, base, "HEAD", tmp_path / "report", skip_inventory=True)
     assert result["status"] == "fail"
     findings = result["files"][0]["sides"][-1]["findings"]
     assert findings[0]["status"] == "info"

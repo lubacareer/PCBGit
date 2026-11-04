@@ -231,9 +231,22 @@ def test_unrecognized_geometry_is_not_silently_passed(tmp_path):
       (via micro (at 0 0) (size 0.3) (drill 0.1))
       (segment (start 0 0) (end 1 0) (layer "F.Cu") (net 1))
     """))
-    assert result["status"] == "partial"
+    assert result["status"] == "unknown"
     assert any("Microvias" in gap for gap in result["unsupported"])
     assert any(f["code"] == "dfm_unsupported_item" for f in result["findings"])
+
+
+@pytest.mark.parametrize("fields", [
+    '(layer (bad)) (net 1)',
+    '(layer "F.Cu" "B.Cu") (net 1)',
+    '(layer "F.Cu") (net (bad))',
+    '(layer "F.Cu") (net -1)',
+    '(layer "F.Cu") (net invalid)',
+])
+def test_malformed_track_layer_or_net_fails_closed(tmp_path, fields):
+    result = check_board(board(tmp_path, f'(segment (start 0 0) (end 1 0) (width 0.2) {fields})'))
+    assert result["status"] == "unknown"
+    assert next(f for f in result["findings"] if f["code"] == "dfm_unsupported_item")["status"] == "unknown"
 
 
 def test_review_reports_clearance_numeric_error_as_unknown(tmp_path):
@@ -260,7 +273,7 @@ def test_review_reports_clearance_numeric_error_as_unknown(tmp_path):
     assert next(f for f in findings if f.get("code") == "dfm_clearance_numeric_unknown")["status"] == "unknown"
 
 
-@pytest.mark.parametrize("scenario,expected_exit", [("cap", 2), ("cap_mixed", 1), ("mixed", 1), ("net_zero", 2)])
+@pytest.mark.parametrize("scenario,expected_exit", [("cap", 2), ("cap_mixed", 1), ("mixed", 1), ("net_zero", 2), ("malformed", 2)])
 def test_cli_propagates_clearance_unknown_and_known_failures(tmp_path, monkeypatch, scenario, expected_exit):
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -283,6 +296,9 @@ def test_cli_propagates_clearance_unknown_and_known_failures(tmp_path, monkeypat
     elif scenario == "net_zero":
         tracks = [_segment(0, 0, 1, 0, 0.2, "F.Cu", 0), _segment(0, 0.1, 1, 0.1, 0.2, "F.Cu", 1)]
         unknown_code = "track_clearance_unknown_net"
+    elif scenario == "malformed":
+        tracks = ['(segment (start 0 0) (end 1 0) (width 0.2) (layer (bad)) (net 1))']
+        unknown_code = "dfm_unsupported_item"
     else:
         tracks = [_segment(-1e201, 2e200, 7e200, -1e200, 0.2, "F.Cu", 1),
                   _segment(-9e200, -3e200, 6e200, 7e200, 0.2, "F.Cu", 2),
@@ -323,4 +339,4 @@ def test_review_fails_on_dfm_violation(tmp_path):
     findings = result["files"][0]["sides"][-1]["findings"]
     assert findings[0]["status"] == "info"
     assert next(f for f in findings if f.get("code") == "track_width")["status"] == "fail"
-    assert next(f for f in findings if f.get("code") == "dfm_unsupported_item")["status"] == "info"
+    assert next(f for f in findings if f.get("code") == "dfm_unsupported_item")["status"] == "unknown"

@@ -127,6 +127,8 @@ def check_board(board: Path, profile: Path | None = None) -> dict:
     try:
         settings = json.loads((profile or DEFAULT_PROFILE).read_text(encoding="utf-8"))
         for key in _REQUIRED:
+            if isinstance(settings[key], bool) or not isinstance(settings[key], (int, float)):
+                raise ValueError(f"{key} must be a JSON number")
             value = _number(settings[key])
             if value <= 0:
                 raise ValueError(f"{key} must be positive")

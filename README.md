@@ -77,7 +77,9 @@ files in an isolated environment.
   and other complex features may not be matched. Open-shell geometry may not
   produce meaningful Boolean differences. Authored dimensional tolerances and
   GD&T are **always unknown**: they are not interpreted. The 0.01 mm feature
-  matching tolerance is numerical and is not a design tolerance.
+  matching tolerance is numerical and is not a design tolerance. Any changed
+  STEP file therefore makes the overall review unknown (exit code 2), unless a
+  failed check takes precedence; inspect the generated viewer and findings.
 - **Gerber:** Recognized Gerber extensions are shown as aligned before/after
   views and an overlay. Overlay colors denote revisions, not calculated added
   and removed copper. Check the report for unsupported or unreadable files.

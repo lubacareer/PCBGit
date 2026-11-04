@@ -3,6 +3,8 @@ from pathlib import Path
 import subprocess
 from unittest.mock import patch
 
+import pytest
+
 from pcbgit.dfm import DEFAULT_PROFILE, check_board
 from pcbgit.review import review
 
@@ -74,6 +76,21 @@ def test_invalid_inputs_are_unknown(tmp_path):
     profile = tmp_path / "bad.json"
     profile.write_text('{"min_track_width_mm": -1}', encoding="utf-8")
     assert check_board(target, profile)["status"] == "unknown"
+
+
+@pytest.mark.parametrize("invalid", [True, False, "0.1", None, [], {}])
+def test_profile_requires_json_numbers_but_board_numbers_are_strings(tmp_path, invalid):
+    settings = json.loads(DEFAULT_PROFILE.read_text(encoding="utf-8"))
+    settings["min_slot_length_width_ratio"] = invalid
+    custom = tmp_path / "rules.json"
+    custom.write_text(json.dumps(settings), encoding="utf-8")
+    target = board(tmp_path, '(segment (start 0 0) (end 1 0) (width 0.2) (layer "F.Cu") (net 1))')
+    result = check_board(target, custom)
+    assert result["status"] == "unknown"
+    assert result["findings"][0]["code"] == "dfm_input_error"
+    assert "must be a JSON number" in result["findings"][0]["message"]
+    # The default numeric profile still parses KiCad's textual geometry values.
+    assert check_board(target)["status"] == "partial"
 
 
 def test_unrecognized_geometry_is_not_silently_passed(tmp_path):

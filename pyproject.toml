@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pcbgit"
+version = "0.1.0"
+description = "Review CAD changes and run hardware checks in CI"
+requires-python = ">=3.10"
+license = {text = "Apache-2.0"}
+
+[project.scripts]
+pcbgit = "pcbgit.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["pcbgit*"]
+
+[tool.setuptools.package-data]
+pcbgit = ["profiles/*.json"]

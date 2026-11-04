@@ -3,6 +3,9 @@
 PCBGit reviews hardware changes in Git. This first phase compares KiCad 9 PCB
 and schematic snapshots, renders SVGs, and runs the project's DRC and ERC rules.
 The checks do not replace fabrication review or guarantee manufacturability.
+Enabled inner copper layers are exported as separate, named SVGs for each
+reviewed revision. If layers cannot be determined or rendered, the report
+marks the comparison unknown.
 
 Changed STEP and Gerber files also get standalone comparison viewers. Install
 the optional geometry dependencies on Python 3.12 or newer with

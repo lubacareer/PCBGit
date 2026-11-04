@@ -1,0 +1,13 @@
+(kicad_symbol_lib
+  (version 20231120)
+  (generator "pcbgit-fixture")
+  (symbol "Part"
+    (exclude_from_sim no) (in_bom yes) (on_board yes)
+    (property "Reference" "U" (at 0 -2.54 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "Part" (at 0 2.54 0) (effects (font (size 1.27 1.27))))
+    (symbol "Part_0_1"
+      (rectangle (start -2.54 -1.27) (end 2.54 1.27)
+        (stroke (width 0) (type default)) (fill (type background)))
+    )
+  )
+)

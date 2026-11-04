@@ -7,7 +7,8 @@ The checks do not replace fabrication review or guarantee manufacturability.
 Changed STEP and Gerber files also get standalone comparison viewers. Install
 the optional geometry dependencies on Python 3.12 or newer with
 `python -m pip install '.[geometry]'`. STEP solid differences are shown in red
-and green; cylindrical-hole matching is limited and reports ambiguity. Authored
+and green; cylindrical-hole matching uses bounded face extents and reports
+ambiguity, including split faces. It does not prove hole design intent. Authored
 tolerances and GD&T are currently reported as unknown, so a STEP comparison
 returns an unknown verdict (exit 2) until they can be interpreted. Gerber overlays show
 revisions, not a calculated Boolean difference.

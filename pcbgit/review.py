@@ -53,11 +53,14 @@ def snapshot(repo: Path, ref: str, destination: Path) -> str:
             header, name = entry.split(b"\t", 1)
             mode, kind, oid, size = header.split()
             path = name.decode("utf-8", "surrogateescape")
-            size_int = int(size)
         except (ValueError, UnicodeError) as exc:
             raise ReviewError("Invalid Git tree entry") from exc
         if mode not in (b"100644", b"100755") or kind != b"blob":
             raise ReviewError(f"Unsafe or unsupported repository entry: {path}")
+        try:
+            size_int = int(size)
+        except ValueError as exc:
+            raise ReviewError(f"Invalid Git object size: {path}") from exc
         relative = PurePosixPath(path)
         if (relative.is_absolute() or not relative.parts or ".." in relative.parts
                 or any(part in ("", ".") for part in path.split("/"))

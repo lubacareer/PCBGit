@@ -11,6 +11,14 @@ and green; cylindrical-hole matching is limited and reports ambiguity. Authored
 tolerances and GD&T are currently reported as unknown. Gerber overlays show
 revisions, not a calculated Boolean difference.
 
+DFM checks use the versioned JLCPCB standard two-layer FR-4 profile in
+`pcbgit/profiles/`. They cover track widths, nominal drilled holes and slots,
+and straight-track clearance on the same copper layer for distinct known nets.
+They do not cover all copper objects, stack-ups, finished tolerances, or all
+fabrication rules. Pass `--profile path/to/profile.json` to use a profile from
+the reviewed head commit. Review its assumptions against the fabricator's
+current capabilities before ordering.
+
 Install Python 3.10 or newer, Git, and KiCad 9 with `kicad-cli` on `PATH`:
 
 ```sh

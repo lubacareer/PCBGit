@@ -1,0 +1,14 @@
+{
+  "name": "JLCPCB standard FR-4, two-layer, 1 oz",
+  "version": "2026-11-04",
+  "source": "https://jlcpcb.com/capabilities/Capabilities?type=1",
+  "assumptions": "Two-layer FR-4, 1 oz finished outer copper, conventional drilled through holes. Values are nominal design checks, not a guarantee of manufacture; special cases and finished-hole tolerances require review.",
+  "min_track_width_mm": 0.1,
+  "min_track_clearance_mm": 0.1,
+  "min_via_drill_mm": 0.15,
+  "min_plated_drill_mm": 0.15,
+  "min_nonplated_drill_mm": 0.5,
+  "min_plated_slot_width_mm": 0.5,
+  "min_nonplated_slot_width_mm": 1.0,
+  "min_slot_length_width_ratio": 2.0
+}

@@ -226,6 +226,7 @@ def check_board(board: Path, profile: Path | None = None) -> dict:
                          "actual_mm": round(actual, 6), "minimum_mm": minimum, **details})
 
     tracks: list[dict] = []
+    item_unknown = False
     for item in _walk(root):
         if not item:
             continue
@@ -238,8 +239,14 @@ def check_board(board: Path, profile: Path | None = None) -> dict:
                     violation("track_width", "Track width is below profile minimum", width,
                               settings["min_track_width_mm"], position=list(_xy(item, "start")))
                 if item[0] == "segment":
-                    net = _field(item, "net")[1]
-                    layer = _field(item, "layer")[1]
+                    net_field, layer_field = _field(item, "net"), _field(item, "layer")
+                    if (len(net_field) != 2 or not isinstance(net_field[1], str)
+                            or not net_field[1].isascii() or not net_field[1].isdigit()):
+                        raise ValueError("track net must be a non-negative integer")
+                    if (len(layer_field) != 2 or not isinstance(layer_field[1], str)
+                            or not layer_field[1]):
+                        raise ValueError("track layer must be a non-empty string")
+                    net, layer = net_field[1], layer_field[1]
                     tracks.append({"a": _xy(item, "start"), "b": _xy(item, "end"),
                                    "width": width, "net": net, "layer": layer})
             elif item[0] in ("via", "pad"):
@@ -277,7 +284,8 @@ def check_board(board: Path, profile: Path | None = None) -> dict:
                         "actual_ratio": round(max(dimensions) / diameter, 6),
                         "minimum_ratio": ratio_limit})
         except (ValueError, IndexError, TypeError, OverflowError) as exc:
-            findings.append({"code": "dfm_unsupported_item", "severity": "warning",
+            item_unknown = True
+            findings.append({"code": "dfm_unsupported_item", "severity": "warning", "status": "unknown",
                              "message": f"Could not inspect {item[0]}: {exc}"})
 
     # Expanding each centerline box by half its width plus half the required
@@ -350,5 +358,5 @@ def check_board(board: Path, profile: Path | None = None) -> dict:
         findings.append({"code": "dfm_clearance_numeric_unknown", "severity": "error", "status": "unknown",
                          "message": "Straight-track clearance could not be verified because a geometry calculation overflowed or underflowed"})
     has_violation = any(f["severity"] == "error" and f["code"] != "dfm_clearance_numeric_unknown" for f in findings)
-    result["status"] = "failed" if has_violation else "unknown" if numeric_unknown or limited or unknown_net else "partial"
+    result["status"] = "failed" if has_violation else "unknown" if numeric_unknown or limited or unknown_net or item_unknown else "partial"
     return result

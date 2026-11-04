@@ -103,6 +103,16 @@ def test_unrecognized_geometry_is_not_silently_passed(tmp_path):
     assert any(f["code"] == "dfm_unsupported_item" for f in result["findings"])
 
 
+def test_overflowing_profile_number_is_unknown(tmp_path):
+    settings = json.loads(DEFAULT_PROFILE.read_text(encoding="utf-8"))
+    settings["min_track_width_mm"] = 10 ** 400
+    profile = tmp_path / "overflow.json"
+    profile.write_text(json.dumps(settings), encoding="utf-8")
+    result = check_board(board(tmp_path, ""), profile)
+    assert result["status"] == "unknown"
+    assert result["findings"][0]["code"] == "dfm_input_error"
+
+
 def test_review_fails_on_dfm_violation(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -116,9 +126,13 @@ def test_review_fails_on_dfm_violation(tmp_path):
     git("add", ".")
     git("commit", "-m", "before")
     base = git("rev-parse", "HEAD")
-    target.write_text(target.read_text().replace("0.2", "0.05"))
+    target.write_text('(kicad_pcb (segment (start 0 0) (end 1 0) (width 0.05) (layer "F.Cu") (net 1)) '
+                      '(segment (start 0 1) (end 1 1) (layer "F.Cu") (net 2)))')
     git("commit", "-am", "after")
     with patch("pcbgit.review.run_tool", return_value=(0, "9.0.9")), patch("pcbgit.review.kicad_file", return_value={"side": "head", "artifacts": [], "findings": []}):
         result = review(repo, base, "HEAD", tmp_path / "report", skip_inventory=True)
     assert result["status"] == "fail"
-    assert any(f.get("code") == "track_width" for f in result["files"][0]["sides"][-1]["findings"])
+    findings = result["files"][0]["sides"][-1]["findings"]
+    assert findings[0]["status"] == "info"
+    assert next(f for f in findings if f.get("code") == "track_width")["status"] == "fail"
+    assert next(f for f in findings if f.get("code") == "dfm_unsupported_item")["status"] == "info"

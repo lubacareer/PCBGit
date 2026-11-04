@@ -136,7 +136,7 @@ def check_board(board: Path, profile: Path | None = None) -> dict:
         root = _parse(Path(board).read_text(encoding="utf-8-sig"))
         if not root or root[0] != "kicad_pcb":
             raise ValueError("not a KiCad PCB S-expression")
-    except (OSError, UnicodeError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeError, ValueError, KeyError, TypeError, OverflowError, json.JSONDecodeError) as exc:
         findings.append({"code": "dfm_input_error", "severity": "error", "message": str(exc)})
         return result
     result["profile"] = {key: settings.get(key) for key in ("name", "version", "source", "assumptions")}
@@ -194,7 +194,7 @@ def check_board(board: Path, profile: Path | None = None) -> dict:
                         "message": "Plated slot length-to-width ratio is below profile minimum",
                         "actual_ratio": round(max(dimensions) / diameter, 6),
                         "minimum_ratio": settings["min_slot_length_width_ratio"]})
-        except (ValueError, IndexError, TypeError) as exc:
+        except (ValueError, IndexError, TypeError, OverflowError) as exc:
             findings.append({"code": "dfm_unsupported_item", "severity": "warning",
                              "message": f"Could not inspect {item[0]}: {exc}"})
 

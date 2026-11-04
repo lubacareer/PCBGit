@@ -3,11 +3,11 @@ from __future__ import annotations
 
 import hashlib
 import html
-import io
 import json
+import os
 from pathlib import Path, PurePosixPath
+import re
 import subprocess
-import tarfile
 import tempfile
 
 
@@ -25,24 +25,60 @@ def git(repo: Path, *args: str) -> bytes:
 
 def snapshot(repo: Path, ref: str, destination: Path) -> str:
     commit = git(repo, "rev-parse", "--verify", "--end-of-options", f"{ref}^{{commit}}").decode().strip()
-    archive = git(repo, "archive", "--format=tar", commit)
+    # git archive honors untrusted export-ignore attributes; enumerating the
+    # committed tree prevents a change from hiding a design from its review.
+    entries = git(repo, "ls-tree", "-r", "-z", "--long", "--full-tree", commit).split(b"\0")
+    files: list[tuple[str, str, int]] = []
+    total = 0
+    for entry in entries:
+        if not entry:
+            continue
+        try:
+            header, name = entry.split(b"\t", 1)
+            mode, kind, oid, size = header.split()
+            path = name.decode("utf-8", "surrogateescape")
+            size_int = int(size)
+        except (ValueError, UnicodeError) as exc:
+            raise ReviewError("Invalid Git tree entry") from exc
+        if mode not in (b"100644", b"100755") or kind != b"blob":
+            raise ReviewError(f"Unsafe or unsupported repository entry: {path}")
+        relative = PurePosixPath(path)
+        if (relative.is_absolute() or not relative.parts or ".." in relative.parts
+                or any(part in ("", ".") for part in path.split("/"))
+                or "\\" in path or ":" in path):
+            raise ReviewError(f"Unsafe repository path: {path}")
+        if not re.fullmatch(rb"[0-9a-f]{40}|[0-9a-f]{64}", oid):
+            raise ReviewError("Invalid Git object identifier")
+        if size_int < 0 or size_int > 64 * 1024 * 1024:
+            raise ReviewError(f"Repository file exceeds 64 MiB snapshot limit: {path}")
+        total += size_int
+        if total > 256 * 1024 * 1024 or len(files) >= 100000:
+            raise ReviewError("Repository exceeds snapshot size or file count limit")
+        files.append((path, oid.decode("ascii"), size_int))
+
+    try:
+        batch = subprocess.run(["git", "-C", str(repo), "cat-file", "--batch"],
+                               input="".join(oid + "\n" for _, oid, _ in files).encode(),
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               check=True, timeout=120).stdout
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ReviewError(f"Git object extraction failed: {exc}") from exc
     destination.mkdir(parents=True, exist_ok=True)
-    with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
-        for member in tar:
-            path = PurePosixPath(member.name)
-            if path.is_absolute() or ".." in path.parts or not (member.isdir() or member.isfile()):
-                raise ReviewError(f"Unsafe or unsupported repository archive entry: {member.name}")
-            target = destination.joinpath(*path.parts)
-            if member.isdir():
-                target.mkdir(parents=True, exist_ok=True)
-            else:
-                target.parent.mkdir(parents=True, exist_ok=True)
-                source = tar.extractfile(member)
-                if source is None:
-                    raise ReviewError(f"Unable to extract {member.name}")
-                with target.open("wb") as out:
-                    import shutil
-                    shutil.copyfileobj(source, out)
+    position = 0
+    for name, oid, size in files:
+        end_header = batch.find(b"\n", position)
+        if end_header < 0 or batch[position:end_header] != f"{oid} blob {size}".encode():
+            raise ReviewError(f"Unexpected Git object header for {name}")
+        start = end_header + 1
+        end = start + size
+        if end >= len(batch) or batch[end:end + 1] != b"\n":
+            raise ReviewError(f"Incomplete Git object for {name}")
+        target = destination.joinpath(*PurePosixPath(name).parts)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(batch[start:end])
+        position = end + 1
+    if position != len(batch):
+        raise ReviewError("Unexpected trailing Git object data")
     return commit
 
 
@@ -53,8 +89,12 @@ def changed_files(repo: Path, base: str, head: str) -> list[str]:
 
 def run_tool(args: list[str]) -> tuple[int | None, str]:
     try:
+        environment = os.environ.copy()
+        for key in ("DIGIKEY_CLIENT_ID", "DIGIKEY_CLIENT_SECRET", "DIGIKEY_ACCESS_TOKEN",
+                    "DIGIKEY_ACCOUNT_ID", "MOUSER_API_KEY"):
+            environment.pop(key, None)
         result = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                text=True, errors="replace", timeout=180)
+                                text=True, errors="replace", timeout=180, env=environment)
         return result.returncode, result.stdout[-8000:]
     except (OSError, subprocess.TimeoutExpired) as exc:
         return None, str(exc)

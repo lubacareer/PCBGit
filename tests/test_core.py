@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from pcbgit.review import ReviewError, changed_files, review, snapshot, write_report
+from pcbgit.review import ReviewError, changed_files, review, run_tool, snapshot, write_report
 
 
 class CoreTests(unittest.TestCase):
@@ -35,6 +35,22 @@ class CoreTests(unittest.TestCase):
         snapshot(self.repo, self.base, self.root / "snapshot")
         self.assertEqual((self.root / "snapshot" / "board.kicad_pcb").read_text(), "before")
 
+    def test_snapshot_does_not_honor_export_ignore(self):
+        (self.repo / ".gitattributes").write_text("board.kicad_pcb export-ignore\n")
+        self.git("add", ".gitattributes")
+        self.git("commit", "-m", "attempt to hide board")
+        snapshot(self.repo, "HEAD", self.root / "snapshot")
+        self.assertEqual((self.root / "snapshot" / "board.kicad_pcb").read_text(), "after")
+
+    def test_snapshot_rejects_symlink_objects(self):
+        process = subprocess.run(["git", "-C", str(self.repo), "hash-object", "-w", "--stdin"],
+                                 input="../outside", stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE, text=True, check=True)
+        self.git("update-index", "--add", "--cacheinfo", f"120000,{process.stdout.strip()},escape")
+        self.git("commit", "-m", "add symlink")
+        with self.assertRaises(ReviewError):
+            snapshot(self.repo, "HEAD", self.root / "snapshot")
+
     def test_missing_kicad_is_not_a_pass(self):
         with patch("pcbgit.review.run_tool", return_value=(None, "not installed")):
             result = review(self.repo, self.base, "HEAD", self.root / "report")
@@ -51,6 +67,15 @@ class CoreTests(unittest.TestCase):
     def test_invalid_ref_fails(self):
         with self.assertRaises(ReviewError):
             snapshot(self.repo, "does-not-exist", self.root / "snapshot")
+
+    def test_cad_subprocess_does_not_inherit_distributor_credentials(self):
+        secrets = {key: "private" for key in ("DIGIKEY_CLIENT_ID", "DIGIKEY_CLIENT_SECRET",
+                   "DIGIKEY_ACCESS_TOKEN", "DIGIKEY_ACCOUNT_ID", "MOUSER_API_KEY")}
+        with patch.dict("os.environ", secrets), patch("pcbgit.review.subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess(["kicad-cli"], 0, "ok")
+            self.assertEqual(run_tool(["kicad-cli", "version"]), (0, "ok"))
+            environment = run.call_args.kwargs["env"]
+        self.assertTrue(all(key not in environment for key in secrets))
 
 
 if __name__ == "__main__":

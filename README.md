@@ -15,6 +15,11 @@ revisions, not a calculated Boolean difference.
 DFM checks use the versioned JLCPCB standard two-layer FR-4 profile in
 `pcbgit/profiles/`. They cover track widths, nominal drilled holes and slots,
 and straight-track clearance on the same copper layer for distinct known nets.
+Proximity involving an unassigned net is reported as unknown; exceeding the
+clearance candidate limit also makes the check unknown. The profile's
+`min_slot_length_width_ratio` applies to plated slots. Non-plated slots have
+no default aspect-ratio rule; projects may specify the optional positive
+`min_nonplated_slot_length_width_ratio` after checking their fabricator's rules.
 They do not cover all copper objects, stack-ups, finished tolerances, or all
 fabrication rules. Pass `--profile path/to/profile.json` to use a profile from
 the reviewed head commit. Review its assumptions against the fabricator's

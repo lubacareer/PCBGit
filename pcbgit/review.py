@@ -6,22 +6,33 @@ import html
 import json
 import os
 from pathlib import Path, PurePosixPath
+import posixpath
 import re
 import subprocess
 import tempfile
 
 from .geometry import GERBER_EXTENSIONS, STEP_EXTENSIONS, compare_files
-from .dfm import check_board
+from .dfm import _parse, check_board
+from .inventory import check_inventory
 
 
 class ReviewError(Exception):
     pass
 
 
+def git_environment() -> dict[str, str]:
+    environment = os.environ.copy()
+    for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
+                "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_PREFIX"):
+        environment.pop(key, None)
+    return environment
+
+
 def git(repo: Path, *args: str) -> bytes:
     try:
         return subprocess.run(["git", "-C", str(repo), *args], check=True,
-                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120).stdout
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120,
+                              env=git_environment()).stdout
     except (OSError, subprocess.SubprocessError) as exc:
         raise ReviewError(f"Git command failed: {exc}") from exc
 
@@ -63,7 +74,7 @@ def snapshot(repo: Path, ref: str, destination: Path) -> str:
         batch = subprocess.run(["git", "-C", str(repo), "cat-file", "--batch"],
                                input="".join(oid + "\n" for _, oid, _ in files).encode(),
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                               check=True, timeout=120).stdout
+                               check=True, timeout=120, env=git_environment()).stdout
     except (OSError, subprocess.SubprocessError) as exc:
         raise ReviewError(f"Git object extraction failed: {exc}") from exc
     destination.mkdir(parents=True, exist_ok=True)
@@ -106,8 +117,10 @@ def run_tool(args: list[str]) -> tuple[int | None, str]:
 def kicad_file(path: Path, relative: str, output: Path, side: str, check: bool) -> dict:
     kind = "pcb" if path.suffix.lower() == ".kicad_pcb" else "sch"
     digest = hashlib.sha256(relative.encode("utf-8", "surrogateescape")).hexdigest()[:16]
-    dest = output / "assets" / digest / side
-    dest.mkdir(parents=True, exist_ok=True)
+    output.mkdir(parents=True, exist_ok=True)
+    # Use a fresh directory every invocation, so a successful command that
+    # produces no output cannot accidentally reuse last run's artifacts.
+    dest = Path(tempfile.mkdtemp(prefix=f"pcbgit-{digest}-{side}-", dir=output))
     artifacts, findings = [], []
     if kind == "pcb":
         args = ["kicad-cli", "pcb", "export", "svg", "--layers", "F.Cu,B.Cu,Edge.Cuts,F.Silkscreen,B.Silkscreen", "--mode-single", "--output", str(dest / "board.svg"), str(path)]
@@ -151,6 +164,9 @@ def write_report(result: dict, output: Path) -> None:
              f"<p>Base: {esc(result['base'])}<br>Head: {esc(result['head'])}</p>"]
     for finding in result.get("findings", []):
         parts.append(f"<p class='{esc(finding.get('status', ''))}'>{esc(finding.get('message', ''))}</p>")
+    if "inventory" in result:
+        inv = result["inventory"]
+        parts.append(f"<section><h2>Inventory: {esc(inv['status'])}</h2><pre>{esc(json.dumps(inv['findings'], indent=2, ensure_ascii=True))}</pre></section>")
     for item in result.get("files", []):
         parts.append(f"<section><h2>{esc(item['path'])}</h2><div class='images'>")
         for side in item.get("sides", []):
@@ -177,7 +193,54 @@ def snapshot_path(root: Path, value: str) -> Path:
     return root.joinpath(*path.parts)
 
 
-def review(repo: Path, base_ref: str, head_ref: str, output: Path, profile: str | None = None) -> dict:
+def schematic_roots(root: Path) -> tuple[set[str], list[dict]]:
+    """Identify root sheets; never infer roots from an incomplete hierarchy."""
+    paths = {path.relative_to(root).as_posix(): path for path in root.rglob("*")
+             if path.is_file() and path.suffix.lower() == ".kicad_sch"}
+    children = {name: set() for name in paths}
+    errors = []
+    for name, path in paths.items():
+        try:
+            node = _parse(path.read_text(encoding="utf-8-sig"))
+            if not node or node[0] != "kicad_sch":
+                raise ValueError("not a KiCad schematic")
+            for sheet in (item for item in node if isinstance(item, list) and item and item[0] == "sheet"):
+                properties = [item for item in sheet if isinstance(item, list) and len(item) >= 3
+                              and item[0] == "property" and str(item[1]).casefold() in ("sheetfile", "sheet file")]
+                if len(properties) != 1 or not isinstance(properties[0][2], str):
+                    raise ValueError("sheet has missing or ambiguous Sheetfile property")
+                child = properties[0][2]
+                if not child or "\\" in child or ":" in child or "$" in child or child.startswith("/"):
+                    raise ValueError("sheet path is unsupported or ambiguous")
+                child = posixpath.normpath(posixpath.join(posixpath.dirname(name), child))
+                if child == ".." or child.startswith("../") or child not in paths:
+                    raise ValueError(f"sheet file is missing or outside the snapshot: {child}")
+                children[name].add(child)
+        except (OSError, UnicodeError, ValueError, TypeError, RecursionError) as exc:
+            errors.append({"status": "unknown", "message": f"Schematic hierarchy could not be resolved for {name}: {exc}"})
+    if errors:
+        return set(), errors
+    indegree = {name: 0 for name in paths}
+    for references in children.values():
+        for child in references:
+            indegree[child] += 1
+    roots = {name for name, count in indegree.items() if count == 0}
+    pending = list(roots)
+    visited = 0
+    while pending:
+        name = pending.pop()
+        visited += 1
+        for child in children[name]:
+            indegree[child] -= 1
+            if indegree[child] == 0:
+                pending.append(child)
+    if visited != len(paths):
+        return set(), [{"status": "unknown", "message": "Schematic hierarchy contains a cycle; ERC roots cannot be determined."}]
+    return roots, []
+
+
+def review(repo: Path, base_ref: str, head_ref: str, output: Path, profile: str | None = None,
+           bom: str | None = None, build_quantity: int = 1, skip_inventory: bool = False) -> dict:
     repo, output = repo.resolve(), output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="pcbgit-") as temp:
@@ -192,6 +255,8 @@ def review(repo: Path, base_ref: str, head_ref: str, output: Path, profile: str 
         supported = version_code == 0 and version.strip().split(".")[0] == "9"
         result = {"schema_version": 1, "base": base_commit, "head": head_commit,
                   "status": "pass", "files": [], "findings": []}
+        roots, hierarchy_findings = schematic_roots(root / "head")
+        result["findings"].extend(hierarchy_findings)
         if not supported:
             result["findings"].append({"status": "unknown", "message": f"KiCad 9 is required: {version.strip()}"})
         changed = changed_files(repo, base_commit, head_commit)
@@ -218,7 +283,8 @@ def review(repo: Path, base_ref: str, head_ref: str, output: Path, profile: str 
             for side in ("base", "head"):
                 path = root / side / Path(*relative.parts)
                 if path.is_file():
-                    item["sides"].append(kicad_file(path, name, output, side, check=side == "head"))
+                    check = side == "head" and (relative.suffix.lower() == ".kicad_pcb" or name in roots)
+                    item["sides"].append(kicad_file(path, name, output, side, check=check))
             result["files"].append(item)
         # Run checks even when a project file did not itself change.
         changed_set = set(changed)
@@ -226,7 +292,8 @@ def review(repo: Path, base_ref: str, head_ref: str, output: Path, profile: str 
             if path.is_file() and path.suffix.lower() in (".kicad_pcb", ".kicad_sch"):
                 name = path.relative_to(root / "head").as_posix()
                 if name not in changed_set:
-                    result["files"].append({"path": name, "sides": [kicad_file(path, name, output, "head", check=True)]})
+                    check = path.suffix.lower() == ".kicad_pcb" or name in roots
+                    result["files"].append({"path": name, "sides": [kicad_file(path, name, output, "head", check=check)]})
         for item in result["files"]:
             if PurePosixPath(item["path"]).suffix.lower() != ".kicad_pcb":
                 continue
@@ -240,8 +307,24 @@ def review(repo: Path, base_ref: str, head_ref: str, output: Path, profile: str 
             findings.extend({**f, "status": "fail" if f.get("severity") == "error" and status == "fail" else status}
                             for f in dfm["findings"])
             item["sides"].append({"side": "DFM", "artifacts": [], "findings": findings})
+        if skip_inventory:
+            inventory = check_inventory(Path("."), build_quantity, skip=True)
+        else:
+            bom_path = snapshot_path(root / "head", bom) if bom else root / "generated-bom.csv"
+            if not bom:
+                schematics = sorted((root / "head").rglob("*.kicad_sch"))
+                if len(schematics) == 1:
+                    code, _ = run_tool(["kicad-cli", "sch", "export", "bom", "--fields",
+                                        "Reference,${QUANTITY},${DNP},DigiKey,Mouser", "--labels",
+                                        "Refs,Qty,DNP,DigiKey,Mouser", "--group-by", "Value,Footprint,DigiKey,Mouser",
+                                        "--string-delimiter", '"', "--exclude-dnp", "--output", str(bom_path), str(schematics[0])])
+                    if code != 0 and bom_path.exists():
+                        bom_path.unlink()
+            inventory = check_inventory(bom_path, build_quantity)
+        result["inventory"] = inventory
         statuses = [f.get("status") for f in result["findings"]]
         statuses.extend(f.get("status") for item in result["files"] for side in item["sides"] for f in side["findings"])
+        statuses.append(inventory["status"])
         result["status"] = "fail" if "fail" in statuses else "unknown" if "unknown" in statuses else "pass"
         write_report(result, output)
         return result

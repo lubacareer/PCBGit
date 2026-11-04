@@ -14,3 +14,14 @@ jobs:
           python-version: '3.12'
       - run: python -m pip install '.[geometry,test]'
       - run: python -m pytest -q
+  container:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: docker build -t pcbgit-ci .
+      - name: Smoke test container and committed Git snapshots
+        run: docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/workspace" pcbgit-ci review --base HEAD^ --head HEAD --skip-inventory --output /tmp/pcbgit-report
+      - name: Exercise real KiCad exports and checks
+        run: docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/workspace" --entrypoint /opt/pcbgit/bin/python pcbgit-ci -m unittest discover -s tests -p test_kicad_integration.py -v

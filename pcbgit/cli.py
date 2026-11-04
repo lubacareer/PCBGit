@@ -15,9 +15,13 @@ def main(argv=None):
     cmd.add_argument("--head", default="HEAD", help="Head Git revision")
     cmd.add_argument("--output", type=Path, default=Path("pcbgit-report"))
     cmd.add_argument("--profile", help="Repository-relative JSON DFM profile at the head revision")
+    cmd.add_argument("--bom", help="Repository-relative KiCad-exported BOM CSV at the head revision")
+    cmd.add_argument("--build-quantity", type=int, default=1, help="Number of boards to build")
+    cmd.add_argument("--skip-inventory", action="store_true", help="Skip stock gate for an untrusted PR")
     args = parser.parse_args(argv)
     try:
-        result = review(args.repo, args.base, args.head, args.output, profile=args.profile)
+        result = review(args.repo, args.base, args.head, args.output, profile=args.profile,
+                        bom=args.bom, build_quantity=args.build_quantity, skip_inventory=args.skip_inventory)
     except (ReviewError, OSError, ValueError) as exc:
         print(f"PCBGit error: {exc}", file=sys.stderr)
         return 2

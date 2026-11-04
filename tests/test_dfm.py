@@ -102,6 +102,6 @@ def test_review_fails_on_dfm_violation(tmp_path):
     target.write_text(target.read_text().replace("0.2", "0.05"))
     git("commit", "-am", "after")
     with patch("pcbgit.review.run_tool", return_value=(0, "9.0.9")), patch("pcbgit.review.kicad_file", return_value={"side": "head", "artifacts": [], "findings": []}):
-        result = review(repo, base, "HEAD", tmp_path / "report")
+        result = review(repo, base, "HEAD", tmp_path / "report", skip_inventory=True)
     assert result["status"] == "fail"
     assert any(f.get("code") == "track_width" for f in result["files"][0]["sides"][-1]["findings"])

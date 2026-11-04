@@ -34,7 +34,7 @@ def test_review_includes_changed_gerber(tmp_path):
     (repo / "layer.gbr").write_text(GERBER.replace("X010000", "X020000"))
     git("commit", "-am", "after")
     with patch("pcbgit.review.run_tool", return_value=(0, "9.0.9")):
-        result = review(repo, base, "HEAD", tmp_path / "report")
+        result = review(repo, base, "HEAD", tmp_path / "report", skip_inventory=True)
     assert result["status"] == "pass"
     assert result["files"][0]["kind"] == "gerber"
     assert (tmp_path / "report" / result["files"][0]["sides"][0]["artifacts"][0]).is_file()

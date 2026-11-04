@@ -6,27 +6,41 @@ import html
 import json
 import os
 from pathlib import Path, PurePosixPath
+import posixpath
 import re
 import subprocess
 import tempfile
 
 from .geometry import GERBER_EXTENSIONS, STEP_EXTENSIONS, compare_files
 from .dfm import check_board
+from .sexpr import _parse
 
 
 class ReviewError(Exception):
     pass
 
 
+def git_environment() -> dict[str, str]:
+    """Prevent inherited Git location overrides from changing the target repo."""
+    environment = os.environ.copy()
+    for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
+                "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_PREFIX"):
+        environment.pop(key, None)
+    return environment
+
+
 def git(repo: Path, *args: str) -> bytes:
+    """Run Git against the selected repository with a bounded execution time."""
     try:
         return subprocess.run(["git", "-C", str(repo), *args], check=True,
-                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120).stdout
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120,
+                              env=git_environment()).stdout
     except (OSError, subprocess.SubprocessError) as exc:
         raise ReviewError(f"Git command failed: {exc}") from exc
 
 
 def snapshot(repo: Path, ref: str, destination: Path) -> str:
+    """Extract committed regular blobs, rejecting paths outside the destination."""
     commit = git(repo, "rev-parse", "--verify", "--end-of-options", f"{ref}^{{commit}}").decode().strip()
     # git archive honors untrusted export-ignore attributes; enumerating the
     # committed tree prevents a change from hiding a design from its review.
@@ -63,10 +77,13 @@ def snapshot(repo: Path, ref: str, destination: Path) -> str:
         batch = subprocess.run(["git", "-C", str(repo), "cat-file", "--batch"],
                                input="".join(oid + "\n" for _, oid, _ in files).encode(),
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                               check=True, timeout=120).stdout
+                               check=True, timeout=120, env=git_environment()).stdout
     except (OSError, subprocess.SubprocessError) as exc:
         raise ReviewError(f"Git object extraction failed: {exc}") from exc
     destination.mkdir(parents=True, exist_ok=True)
+    if destination.is_symlink():
+        raise ReviewError("Snapshot destination must not be a symlink")
+    resolved_destination = destination.resolve()
     position = 0
     for name, oid, size in files:
         end_header = batch.find(b"\n", position)
@@ -77,7 +94,20 @@ def snapshot(repo: Path, ref: str, destination: Path) -> str:
         if end >= len(batch) or batch[end:end + 1] != b"\n":
             raise ReviewError(f"Incomplete Git object for {name}")
         target = destination.joinpath(*PurePosixPath(name).parts)
-        target.parent.mkdir(parents=True, exist_ok=True)
+        # Never follow pre-existing symlinks in a reused destination, even if
+        # they happen to point inside it. Check resolved containment before and
+        # after creating directories so a path cannot escape the snapshot root.
+        current = destination
+        for component in PurePosixPath(name).parts:
+            current = current / component
+            if current.is_symlink() or getattr(current, "is_junction", lambda: False)():
+                raise ReviewError(f"Symlink in snapshot destination: {name}")
+        try:
+            target.resolve().relative_to(resolved_destination)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.resolve().relative_to(resolved_destination)
+        except (ValueError, OSError) as exc:
+            raise ReviewError(f"Snapshot path escapes destination: {name}") from exc
         target.write_bytes(batch[start:end])
         position = end + 1
     if position != len(batch):
@@ -86,11 +116,13 @@ def snapshot(repo: Path, ref: str, destination: Path) -> str:
 
 
 def changed_files(repo: Path, base: str, head: str) -> list[str]:
+    """List changed repository paths without relying on rename detection."""
     raw = git(repo, "diff", "--name-only", "-z", "--no-renames", base, head, "--")
     return [p.decode("utf-8", "surrogateescape") for p in raw.split(b"\0") if p]
 
 
 def run_tool(args: list[str]) -> tuple[int | None, str]:
+    """Run a CAD tool without inherited distributor secrets; bound its output."""
     try:
         environment = os.environ.copy()
         for key in ("DIGIKEY_CLIENT_ID", "DIGIKEY_CLIENT_SECRET", "DIGIKEY_ACCESS_TOKEN",
@@ -104,10 +136,12 @@ def run_tool(args: list[str]) -> tuple[int | None, str]:
 
 
 def kicad_file(path: Path, relative: str, output: Path, side: str, check: bool) -> dict:
+    """Render one snapshot and optionally run its KiCad design rule check."""
     kind = "pcb" if path.suffix.lower() == ".kicad_pcb" else "sch"
     digest = hashlib.sha256(relative.encode("utf-8", "surrogateescape")).hexdigest()[:16]
-    dest = output / "assets" / digest / side
-    dest.mkdir(parents=True, exist_ok=True)
+    output.mkdir(parents=True, exist_ok=True)
+    # A fresh directory prevents stale SVG or check reports from being reused.
+    dest = Path(tempfile.mkdtemp(prefix=f"pcbgit-{digest}-{side}-", dir=output))
     artifacts, findings = [], []
     if kind == "pcb":
         args = ["kicad-cli", "pcb", "export", "svg", "--layers", "F.Cu,B.Cu,Edge.Cuts,F.Silkscreen,B.Silkscreen", "--mode-single", "--output", str(dest / "board.svg"), str(path)]
@@ -142,6 +176,7 @@ def kicad_file(path: Path, relative: str, output: Path, side: str, check: bool) 
 
 
 def write_report(result: dict, output: Path) -> None:
+    """Write machine-readable and HTML reports, escaping untrusted labels."""
     output.mkdir(parents=True, exist_ok=True)
     (output / "report.json").write_text(json.dumps(result, indent=2, ensure_ascii=True), encoding="utf-8")
     esc = lambda value: html.escape(str(value), quote=True)
@@ -177,7 +212,54 @@ def snapshot_path(root: Path, value: str) -> Path:
     return root.joinpath(*path.parts)
 
 
+def schematic_roots(root: Path) -> tuple[set[str], list[dict]]:
+    """Identify root sheets; never infer roots from an incomplete hierarchy."""
+    paths = {path.relative_to(root).as_posix(): path for path in root.rglob("*")
+             if path.is_file() and path.suffix.lower() == ".kicad_sch"}
+    children = {name: set() for name in paths}
+    errors = []
+    for name, path in paths.items():
+        try:
+            node = _parse(path.read_text(encoding="utf-8-sig"))
+            if not node or node[0] != "kicad_sch":
+                raise ValueError("not a KiCad schematic")
+            for sheet in (item for item in node if isinstance(item, list) and item and item[0] == "sheet"):
+                properties = [item for item in sheet if isinstance(item, list) and len(item) >= 3
+                              and item[0] == "property" and str(item[1]).casefold() in ("sheetfile", "sheet file")]
+                if len(properties) != 1 or not isinstance(properties[0][2], str):
+                    raise ValueError("sheet has missing or ambiguous Sheetfile property")
+                child = properties[0][2]
+                if not child or "\\" in child or ":" in child or "$" in child or child.startswith("/"):
+                    raise ValueError("sheet path is unsupported or ambiguous")
+                child = posixpath.normpath(posixpath.join(posixpath.dirname(name), child))
+                if child == ".." or child.startswith("../") or child not in paths:
+                    raise ValueError(f"sheet file is missing or outside the snapshot: {child}")
+                children[name].add(child)
+        except (OSError, UnicodeError, ValueError, TypeError, RecursionError) as exc:
+            errors.append({"status": "unknown", "message": f"Schematic hierarchy could not be resolved for {name}: {exc}"})
+    if errors:
+        return set(), errors
+    indegree = {name: 0 for name in paths}
+    for references in children.values():
+        for child in references:
+            indegree[child] += 1
+    roots = {name for name, count in indegree.items() if count == 0}
+    pending = list(roots)
+    visited = 0
+    while pending:
+        name = pending.pop()
+        visited += 1
+        for child in children[name]:
+            indegree[child] -= 1
+            if indegree[child] == 0:
+                pending.append(child)
+    if visited != len(paths):
+        return set(), [{"status": "unknown", "message": "Schematic hierarchy contains a cycle; ERC roots cannot be determined."}]
+    return roots, []
+
+
 def review(repo: Path, base_ref: str, head_ref: str, output: Path, profile: str | None = None) -> dict:
+    """Compare merge-base and head snapshots and check all head designs."""
     repo, output = repo.resolve(), output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="pcbgit-") as temp:
@@ -192,6 +274,8 @@ def review(repo: Path, base_ref: str, head_ref: str, output: Path, profile: str 
         supported = version_code == 0 and version.strip().split(".")[0] == "9"
         result = {"schema_version": 1, "base": base_commit, "head": head_commit,
                   "status": "pass", "files": [], "findings": []}
+        roots, hierarchy_findings = schematic_roots(root / "head")
+        result["findings"].extend(hierarchy_findings)
         if not supported:
             result["findings"].append({"status": "unknown", "message": f"KiCad 9 is required: {version.strip()}"})
         changed = changed_files(repo, base_commit, head_commit)
@@ -204,7 +288,7 @@ def review(repo: Path, base_ref: str, head_ref: str, output: Path, profile: str 
                 comparison = compare_files(old if old.is_file() else None, new if new.is_file() else None,
                                            output / "assets" / digest / "comparison")
                 status = "pass" if comparison["status"] == "ok" else "unknown"
-                findings = [{**f, "status": status if f.get("severity") == "error" else "info"}
+                findings = [{**f, "status": f.get("status", status if f.get("severity") == "error" else "info")}
                             for f in comparison["findings"]]
                 if status == "unknown":
                     findings.append({"status": "unknown", "message": "Geometry comparison could not be completed."})
@@ -218,7 +302,8 @@ def review(repo: Path, base_ref: str, head_ref: str, output: Path, profile: str 
             for side in ("base", "head"):
                 path = root / side / Path(*relative.parts)
                 if path.is_file():
-                    item["sides"].append(kicad_file(path, name, output, side, check=side == "head"))
+                    check = side == "head" and (relative.suffix.lower() == ".kicad_pcb" or name in roots)
+                    item["sides"].append(kicad_file(path, name, output, side, check=check))
             result["files"].append(item)
         # Run checks even when a project file did not itself change.
         changed_set = set(changed)
@@ -226,7 +311,8 @@ def review(repo: Path, base_ref: str, head_ref: str, output: Path, profile: str 
             if path.is_file() and path.suffix.lower() in (".kicad_pcb", ".kicad_sch"):
                 name = path.relative_to(root / "head").as_posix()
                 if name not in changed_set:
-                    result["files"].append({"path": name, "sides": [kicad_file(path, name, output, "head", check=True)]})
+                    check = path.suffix.lower() == ".kicad_pcb" or name in roots
+                    result["files"].append({"path": name, "sides": [kicad_file(path, name, output, "head", check=check)]})
         for item in result["files"]:
             if PurePosixPath(item["path"]).suffix.lower() != ".kicad_pcb":
                 continue

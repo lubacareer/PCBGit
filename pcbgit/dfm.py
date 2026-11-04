@@ -10,52 +10,18 @@ import json
 import heapq
 import math
 from pathlib import Path
-import re
 import secrets
 from typing import Any
 
+from .sexpr import _parse
+
 DEFAULT_PROFILE = Path(__file__).parent / "profiles" / "jlcpcb-standard-2layer.json"
-_TOKEN = re.compile(r'\s+|;[^\n]*|[()]|"(?:\\.|[^"\\])*"|[^\s();"]+')
 _REQUIRED = (
     "min_track_width_mm", "min_track_clearance_mm", "min_via_drill_mm",
     "min_plated_drill_mm", "min_nonplated_drill_mm", "min_plated_slot_width_mm",
     "min_nonplated_slot_width_mm", "min_slot_length_width_ratio",
 )
 _MAX_CLEARANCE_CANDIDATES = 250_000
-
-
-def _parse(text: str) -> list:
-    """Parse KiCad's S-expressions without evaluating input or expanding symbols."""
-    stack: list[list] = []
-    roots: list[list] = []
-    pos = 0
-    for match in _TOKEN.finditer(text):
-        if match.start() != pos:
-            raise ValueError("invalid S-expression token")
-        pos = match.end()
-        token = match.group()
-        if token.isspace() or token.startswith(";"):
-            continue
-        if token == "(":
-            if len(stack) >= 128:
-                raise ValueError("S-expression nesting exceeds 128")
-            node: list = []
-            if stack:
-                stack[-1].append(node)
-            else:
-                roots.append(node)
-            stack.append(node)
-        elif token == ")":
-            if not stack:
-                raise ValueError("unexpected closing parenthesis")
-            stack.pop()
-        elif not stack:
-            raise ValueError("token outside S-expression")
-        else:
-            stack[-1].append(token[1:-1] if token.startswith('"') else token)
-    if pos != len(text) or stack or len(roots) != 1:
-        raise ValueError("incomplete S-expression")
-    return roots[0]
 
 
 def _children(node: list, name: str) -> list[list]:

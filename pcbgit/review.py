@@ -235,9 +235,9 @@ def review(repo: Path, base_ref: str, head_ref: str, output: Path, profile: str 
                 continue
             dfm = check_board(board, profile_path)
             status = {"failed": "fail", "unknown": "unknown", "partial": "info"}[dfm["status"]]
-            findings = [{"status": status, "message": "DFM coverage is partial; unsupported checks require independent review.",
+            findings = [{"status": "info", "message": "DFM coverage is partial; unsupported checks require independent review.",
                          "evidence": {"profile": dfm["profile"], "supported": dfm["supported"], "unsupported": dfm["unsupported"]}}]
-            findings.extend({**f, "status": "fail" if f.get("severity") == "error" and status == "fail" else status}
+            findings.extend({**f, "status": status if f.get("severity") == "error" else "info"}
                             for f in dfm["findings"])
             item["sides"].append({"side": "DFM", "artifacts": [], "findings": findings})
         statuses = [f.get("status") for f in result["findings"]]

@@ -7,9 +7,11 @@ manufacturing spacing need separate review and are always disclosed as gaps.
 from __future__ import annotations
 
 import json
+import heapq
 import math
 from pathlib import Path
 import re
+import secrets
 from typing import Any
 
 DEFAULT_PROFILE = Path(__file__).parent / "profiles" / "jlcpcb-standard-2layer.json"
@@ -19,6 +21,7 @@ _REQUIRED = (
     "min_plated_drill_mm", "min_nonplated_drill_mm", "min_plated_slot_width_mm",
     "min_nonplated_slot_width_mm", "min_slot_length_width_ratio",
 )
+_MAX_CLEARANCE_CANDIDATES = 250_000
 
 
 def _parse(text: str) -> list:
@@ -107,6 +110,84 @@ def _segment_distance(a, b, c, d) -> float:
                _distance_point_segment(c, a, b), _distance_point_segment(d, a, b))
 
 
+class _IntervalNode:
+    """Randomized interval tree node storing its subtree's maximum end."""
+    __slots__ = ("key", "end", "box", "priority", "left", "right", "max_end")
+
+    def __init__(self, key, end, box):
+        self.key, self.end, self.box = key, end, box
+        self.priority = secrets.randbits(64)
+        self.left = self.right = None
+        self.max_end = end
+
+
+def _refresh(node):
+    if node:
+        node.max_end = max(node.end, node.left.max_end if node.left else -math.inf,
+                           node.right.max_end if node.right else -math.inf)
+    return node
+
+
+def _insert(node, new):
+    if node is None:
+        return new
+    if new.key < node.key:
+        node.left = _insert(node.left, new)
+        if node.left.priority < node.priority:
+            child = node.left
+            node.left = child.right
+            child.right = _refresh(node)
+            return _refresh(child)
+    else:
+        node.right = _insert(node.right, new)
+        if node.right.priority < node.priority:
+            child = node.right
+            node.right = child.left
+            child.left = _refresh(node)
+            return _refresh(child)
+    return _refresh(node)
+
+
+def _merge_intervals(left, right):
+    if not left:
+        return right
+    if not right:
+        return left
+    if left.priority < right.priority:
+        left.right = _merge_intervals(left.right, right)
+        return _refresh(left)
+    right.left = _merge_intervals(left, right.left)
+    return _refresh(right)
+
+
+def _remove(node, key):
+    if node is None:
+        return None
+    if node.key == key:
+        return _merge_intervals(node.left, node.right)
+    if key < node.key:
+        node.left = _remove(node.left, key)
+    else:
+        node.right = _remove(node.right, key)
+    return _refresh(node)
+
+
+def _overlapping(node, low, high):
+    """Yield intervals intersecting [low, high], pruning entire subtrees."""
+    pending = [node] if node else []
+    while pending:
+        node = pending.pop()
+        if node.max_end < low:
+            continue
+        if node.left:
+            pending.append(node.left)
+        if node.key[0] <= high:
+            if node.end >= low:
+                yield node.box
+            if node.right:
+                pending.append(node.right)
+
+
 def check_board(board: Path, profile: Path | None = None) -> dict:
     """Check supported nominal PCB geometry against a JSON manufacturing profile.
 
@@ -127,6 +208,8 @@ def check_board(board: Path, profile: Path | None = None) -> dict:
     try:
         settings = json.loads((profile or DEFAULT_PROFILE).read_text(encoding="utf-8"))
         for key in _REQUIRED:
+            if isinstance(settings[key], bool) or not isinstance(settings[key], (int, float)):
+                raise ValueError(f"{key} must be a JSON number")
             value = _number(settings[key])
             if value <= 0:
                 raise ValueError(f"{key} must be positive")
@@ -134,7 +217,7 @@ def check_board(board: Path, profile: Path | None = None) -> dict:
         root = _parse(Path(board).read_text(encoding="utf-8-sig"))
         if not root or root[0] != "kicad_pcb":
             raise ValueError("not a KiCad PCB S-expression")
-    except (OSError, UnicodeError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeError, ValueError, KeyError, TypeError, OverflowError, json.JSONDecodeError) as exc:
         findings.append({"code": "dfm_input_error", "severity": "error", "message": str(exc)})
         return result
     result["profile"] = {key: settings.get(key) for key in ("name", "version", "source", "assumptions")}
@@ -192,17 +275,41 @@ def check_board(board: Path, profile: Path | None = None) -> dict:
                         "message": "Plated slot length-to-width ratio is below profile minimum",
                         "actual_ratio": round(max(dimensions) / diameter, 6),
                         "minimum_ratio": settings["min_slot_length_width_ratio"]})
-        except (ValueError, IndexError, TypeError) as exc:
+        except (ValueError, IndexError, TypeError, OverflowError) as exc:
             findings.append({"code": "dfm_unsupported_item", "severity": "warning",
                              "message": f"Could not inspect {item[0]}: {exc}"})
 
-    pairs = len(tracks) * (len(tracks) - 1) // 2
-    if pairs > 250000:
-        unsupported.append("Straight-track clearance skipped: more than 250,000 candidate pairs")
-    else:
-        for i, first in enumerate(tracks):
-            for second in tracks[i + 1:]:
-                if first["layer"] != second["layer"] or first["net"] == second["net"] or "0" in (first["net"], second["net"]):
+    # Expanding each centerline box by half its width plus half the required
+    # clearance cannot discard any pair that violates the distance check.
+    # Sweep each layer independently, pruning boxes on both axes before the
+    # exact segment calculation. Bound overlapping candidates for dense boards
+    # and disclose any unfinished coverage.
+    layers: dict[str, list[tuple]] = {}
+    for track in tracks:
+        if track["net"] == "0":
+            continue
+        radius = (track["width"] + settings["min_track_clearance_mm"]) / 2
+        a, b = track["a"], track["b"]
+        box = (min(a[0], b[0]) - radius, max(a[0], b[0]) + radius,
+               min(a[1], b[1]) - radius, max(a[1], b[1]) + radius, track)
+        layers.setdefault(track["layer"], []).append(box)
+    candidates = 0
+    limited = False
+    for boxes in layers.values():
+        boxes.sort(key=lambda box: box[0])
+        tree = None
+        expiry = []
+        for index, current in enumerate(boxes):
+            while expiry and expiry[0][0] < current[0]:
+                _, key = heapq.heappop(expiry)
+                tree = _remove(tree, key)
+            for old in _overlapping(tree, current[2], current[3]):
+                candidates += 1
+                if candidates > _MAX_CLEARANCE_CANDIDATES:
+                    limited = True
+                    break
+                first, second = old[4], current[4]
+                if first["net"] == second["net"]:
                     continue
                 distance = _segment_distance(first["a"], first["b"], second["a"], second["b"])
                 clearance = max(0.0, distance - (first["width"] + second["width"]) / 2)
@@ -210,5 +317,14 @@ def check_board(board: Path, profile: Path | None = None) -> dict:
                     violation("track_clearance", "Copper clearance between distinct-net tracks is below profile minimum",
                               clearance, settings["min_track_clearance_mm"], layer=first["layer"],
                               start_a=list(first["a"]), start_b=list(second["a"]))
+            if limited:
+                break
+            key = (current[2], index)
+            tree = _insert(tree, _IntervalNode(key, current[3], current))
+            heapq.heappush(expiry, (current[1], key))
+        if limited:
+            break
+    if limited:
+        unsupported.append("Straight-track clearance incomplete: candidate limit exceeded")
     result["status"] = "failed" if any(f["severity"] == "error" for f in findings) else "partial"
     return result

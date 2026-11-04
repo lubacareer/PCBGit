@@ -52,10 +52,18 @@ class CoreTests(unittest.TestCase):
     def test_snapshot_rejects_symlink_objects(self):
         process = subprocess.run(["git", "-C", str(self.repo), "hash-object", "-w", "--stdin"],
                                  input="../outside", stdout=subprocess.PIPE,
-                                 stderr=subprocess.PIPE, text=True, check=True)
+                                 stderr=subprocess.PIPE, text=True, check=True,
+                                 timeout=30, env=git_environment())
         self.git("update-index", "--add", "--cacheinfo", f"120000,{process.stdout.strip()},escape")
         self.git("commit", "-m", "add symlink")
         with self.assertRaises(ReviewError):
+            snapshot(self.repo, "HEAD", self.root / "snapshot")
+
+    def test_snapshot_rejects_gitlink_as_unsupported(self):
+        oid = self.git("rev-parse", "HEAD").strip()
+        self.git("update-index", "--add", "--cacheinfo", f"160000,{oid},submodule")
+        self.git("commit", "-m", "add gitlink")
+        with self.assertRaisesRegex(ReviewError, "Unsafe or unsupported repository entry: submodule"):
             snapshot(self.repo, "HEAD", self.root / "snapshot")
 
     def test_git_snapshot_ignores_inherited_repository_overrides(self):

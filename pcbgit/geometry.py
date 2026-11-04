@@ -16,8 +16,11 @@ GERBER_EXTENSIONS = {".gbr", ".ger", ".gtl", ".gbl", ".gts", ".gbs", ".gto", ".g
 COMPARISON_TOLERANCE_MM = 0.01
 
 
-def _finding(code, message, severity="info", **evidence):
-    return {"code": code, "severity": severity, "message": message, "evidence": evidence}
+def _finding(code, message, severity="info", *, status=None, **evidence):
+    finding = {"code": code, "severity": severity, "message": message, "evidence": evidence}
+    if status is not None:
+        finding["status"] = status
+    return finding
 
 
 def _changed(base, head):
@@ -171,12 +174,12 @@ def _hole_findings(old, new):
             if distance > COMPARISON_TOLERANCE_MM:
                 findings.append(_finding("hole_moved", "A uniquely matched cylindrical interior face appears to have moved; verify the highlighted geometry.", "warning", before=a, after=b, axis_shift_mm=round(distance, 5)))
         elif candidates[i]:
-            findings.append(_finding("hole_match_ambiguous", "Multiple cylindrical faces could match; a moved hole cannot be identified reliably.", "warning", before=a, candidate_count=len(candidates[i])))
+            findings.append(_finding("hole_match_ambiguous", "Multiple cylindrical faces could match; a moved hole cannot be identified reliably.", "warning", status="unknown", before=a, candidate_count=len(candidates[i])))
         else:
-            findings.append(_finding("hole_unmatched_before", "A cylindrical interior face has no diameter-and-axis match in the new model.", "warning", before=a))
+            findings.append(_finding("hole_unmatched_before", "A cylindrical interior face has no diameter-and-axis match in the new model.", "warning", status="unknown", before=a))
     for j, b in enumerate(new):
         if j not in matched_new and not reverse[j]:
-            findings.append(_finding("hole_unmatched_after", "A cylindrical interior face has no diameter-and-axis match in the old model.", "warning", after=b))
+            findings.append(_finding("hole_unmatched_after", "A cylindrical interior face has no diameter-and-axis match in the old model.", "warning", status="unknown", after=b))
     return findings
 
 
@@ -214,8 +217,8 @@ def _compare_step(base, head, output_dir, result):
     old, new = (_read_step(p) if p else None for p in (base, head))
     old_box, new_box = (_bbox(s) if s else None for s in (old, new))
     result["findings"].append(_finding("step_bounds", "Model bounding boxes in millimeters; compare them to investigate dimensional changes.", before_mm=old_box, after_mm=new_box))
-    result["findings"].append(_finding("step_tolerances_unknown", "Authored dimensional tolerances and GD&T were not interpreted; absent or unsupported metadata must not be treated as unchanged.", "warning", comparison_tolerance_mm=COMPARISON_TOLERANCE_MM))
-    result["findings"].append(_finding("hole_recognition_scope", "Hole recognition is limited to reversed cylindrical faces; blind holes, split faces and coincident or repeated diameters may be ambiguous. Coordinate positions are points on infinite axes, not hole depths.", "warning"))
+    result["findings"].append(_finding("step_tolerances_unknown", "Authored dimensional tolerances and GD&T were not interpreted; absent or unsupported metadata must not be treated as unchanged.", "warning", status="unknown", comparison_tolerance_mm=COMPARISON_TOLERANCE_MM))
+    result["findings"].append(_finding("hole_recognition_scope", "Hole recognition is limited to reversed cylindrical faces; blind holes, split faces and coincident or repeated diameters may be ambiguous. Coordinate positions are points on infinite axes, not hole depths.", "warning", status="unknown"))
     old_holes, new_holes = (_holes(s) if s else [] for s in (old, new))
     result["findings"].extend(_hole_findings(old_holes, new_holes))
     def difference(a, b):

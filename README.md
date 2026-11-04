@@ -8,7 +8,8 @@ Changed STEP and Gerber files also get standalone comparison viewers. Install
 the optional geometry dependencies on Python 3.12 or newer with
 `python -m pip install '.[geometry]'`. STEP solid differences are shown in red
 and green; cylindrical-hole matching is limited and reports ambiguity. Authored
-tolerances and GD&T are currently reported as unknown. Gerber overlays show
+tolerances and GD&T are currently reported as unknown, so a STEP comparison
+returns an unknown verdict (exit 2) until they can be interpreted. Gerber overlays show
 revisions, not a calculated Boolean difference.
 
 Install Python 3.10 or newer, Git, and KiCad 9 with `kicad-cli` on `PATH`:
@@ -26,5 +27,7 @@ also checked, so changing a configuration file does not bypass checks. Git
 tree symlinks and submodules are rejected rather than followed. Reports and
 CAD files from untrusted sources should be viewed in an isolated environment.
 
-Run the tests with `python -m unittest discover -s tests`. Licensed under the
+Install test dependencies and run the full suite with
+`python -m pip install '.[geometry,test]'` and `python -m pytest -q` (Python
+3.12 or newer is required for geometry dependencies). Licensed under the
 Apache License 2.0; see [LICENSE](LICENSE).

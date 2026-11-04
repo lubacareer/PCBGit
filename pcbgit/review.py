@@ -195,7 +195,7 @@ def review(repo: Path, base_ref: str, head_ref: str, output: Path) -> dict:
                 comparison = compare_files(old if old.is_file() else None, new if new.is_file() else None,
                                            output / "assets" / digest / "comparison")
                 status = "pass" if comparison["status"] == "ok" else "unknown"
-                findings = [{**f, "status": status if f.get("severity") == "error" else "info"}
+                findings = [{**f, "status": f.get("status", status if f.get("severity") == "error" else "info")}
                             for f in comparison["findings"]]
                 if status == "unknown":
                     findings.append({"status": "unknown", "message": "Geometry comparison could not be completed."})

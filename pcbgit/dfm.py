@@ -56,21 +56,45 @@ def _xy(node: list, name: str) -> tuple[float, float]:
     return _number(values[1]), _number(values[2])
 
 
+def _finite(value: float) -> float:
+    """Reject overflow instead of reporting an unreliable geometric result."""
+    if not math.isfinite(value):
+        raise ValueError("non-finite clearance calculation")
+    return value
+
+
+def _mul(first: float, second: float) -> float:
+    value = _finite(first * second)
+    if value == 0 and first != 0 and second != 0:
+        raise ValueError("clearance calculation underflow")
+    return value
+
+
 def _distance_point_segment(p, a, b) -> float:
-    dx, dy = b[0] - a[0], b[1] - a[1]
-    length_squared = dx * dx + dy * dy
+    dx, dy = _finite(b[0] - a[0]), _finite(b[1] - a[1])
+    length_squared = _finite(_mul(dx, dx) + _mul(dy, dy))
     if length_squared == 0:
-        return math.dist(p, a)
-    t = max(0.0, min(1.0, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / length_squared))
-    return math.dist(p, (a[0] + t * dx, a[1] + t * dy))
+        return _finite(math.dist(p, a))
+    px, py = _finite(p[0] - a[0]), _finite(p[1] - a[1])
+    numerator = _finite(_mul(px, dx) + _mul(py, dy))
+    t = max(0.0, min(1.0, _finite(numerator / length_squared)))
+    closest = (_finite(a[0] + _mul(t, dx)), _finite(a[1] + _mul(t, dy)))
+    return _finite(math.dist(p, closest))
 
 
 def _segment_distance(a, b, c, d) -> float:
     def cross(p, q, r):
-        return (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0])
-    # Proper crossing, including endpoint contact. Collinear overlap is handled
-    # by the point-to-segment distances below.
-    if cross(a, b, c) * cross(a, b, d) < 0 and cross(c, d, a) * cross(c, d, b) < 0:
+        x1, y1 = _finite(q[0] - p[0]), _finite(q[1] - p[1])
+        x2, y2 = _finite(r[0] - p[0]), _finite(r[1] - p[1])
+        return _finite(_mul(x1, y2) - _mul(y1, x2))
+
+    def opposite(first, second):
+        # Avoid overflowing the product of two otherwise finite cross products.
+        return (first < 0 < second) or (second < 0 < first)
+
+    ab_c, ab_d = cross(a, b, c), cross(a, b, d)
+    cd_a, cd_b = cross(c, d, a), cross(c, d, b)
+    if opposite(ab_c, ab_d) and opposite(cd_a, cd_b):
         return 0.0
     return min(_distance_point_segment(a, c, d), _distance_point_segment(b, c, d),
                _distance_point_segment(c, a, b), _distance_point_segment(d, a, b))
@@ -251,13 +275,18 @@ def check_board(board: Path, profile: Path | None = None) -> dict:
     # exact segment calculation. Bound overlapping candidates for dense boards
     # and disclose any unfinished coverage.
     layers: dict[str, list[tuple]] = {}
+    numeric_unknown = False
     for track in tracks:
         if track["net"] == "0":
             continue
-        radius = (track["width"] + settings["min_track_clearance_mm"]) / 2
-        a, b = track["a"], track["b"]
-        box = (min(a[0], b[0]) - radius, max(a[0], b[0]) + radius,
-               min(a[1], b[1]) - radius, max(a[1], b[1]) + radius, track)
+        try:
+            radius = _finite(_finite(track["width"] + settings["min_track_clearance_mm"]) / 2)
+            a, b = track["a"], track["b"]
+            box = (_finite(min(a[0], b[0]) - radius), _finite(max(a[0], b[0]) + radius),
+                   _finite(min(a[1], b[1]) - radius), _finite(max(a[1], b[1]) + radius), track)
+        except ValueError:
+            numeric_unknown = True
+            continue
         layers.setdefault(track["layer"], []).append(box)
     candidates = 0
     limited = False
@@ -277,8 +306,13 @@ def check_board(board: Path, profile: Path | None = None) -> dict:
                 first, second = old[4], current[4]
                 if first["net"] == second["net"]:
                     continue
-                distance = _segment_distance(first["a"], first["b"], second["a"], second["b"])
-                clearance = max(0.0, distance - (first["width"] + second["width"]) / 2)
+                try:
+                    distance = _segment_distance(first["a"], first["b"], second["a"], second["b"])
+                    widths = _finite(first["width"] + second["width"])
+                    clearance = max(0.0, _finite(distance - widths / 2))
+                except ValueError:
+                    numeric_unknown = True
+                    continue
                 if clearance + 1e-9 < settings["min_track_clearance_mm"]:
                     violation("track_clearance", "Copper clearance between distinct-net tracks is below profile minimum",
                               clearance, settings["min_track_clearance_mm"], layer=first["layer"],
@@ -292,5 +326,10 @@ def check_board(board: Path, profile: Path | None = None) -> dict:
             break
     if limited:
         unsupported.append("Straight-track clearance incomplete: candidate limit exceeded")
-    result["status"] = "failed" if any(f["severity"] == "error" for f in findings) else "partial"
+    if numeric_unknown:
+        unsupported.append("Straight-track clearance incomplete: non-finite geometry calculation")
+        findings.append({"code": "dfm_clearance_numeric_unknown", "severity": "error",
+                         "message": "Straight-track clearance could not be verified because a geometry calculation overflowed or underflowed"})
+    has_violation = any(f["severity"] == "error" and f["code"] != "dfm_clearance_numeric_unknown" for f in findings)
+    result["status"] = "failed" if has_violation else "unknown" if numeric_unknown else "partial"
     return result

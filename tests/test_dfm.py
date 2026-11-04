@@ -58,6 +58,36 @@ def test_slots_and_custom_profile(tmp_path):
     assert sum(f["code"] == "slot_width" for f in result["findings"]) == 2
 
 
+def test_clearance_numeric_overflow_fails_closed(tmp_path):
+    # The segments cross, but naive cross products overflow to infinity and
+    # can yield a huge apparent distance instead of reporting the violation.
+    target = board(tmp_path, """
+      (segment (start -1e201 2e200) (end 7e200 -1e200) (width 0.2) (layer "F.Cu") (net 1))
+      (segment (start -9e200 -3e200) (end 6e200 7e200) (width 0.2) (layer "F.Cu") (net 2))
+    """)
+    result = check_board(target)
+    assert result["status"] == "unknown"
+    assert any(f["code"] == "dfm_clearance_numeric_unknown" for f in result["findings"])
+    assert any("non-finite" in gap for gap in result["unsupported"])
+
+
+def test_clearance_broad_phase_numeric_overflow_fails_closed(tmp_path):
+    target = board(tmp_path, '(segment (start 1.7e308 0) (end 1.7e308 1) (width 1.7e308) (layer "F.Cu") (net 1))')
+    result = check_board(target)
+    assert result["status"] == "unknown"
+    assert any(f["code"] == "dfm_clearance_numeric_unknown" for f in result["findings"])
+
+
+def test_clearance_numeric_underflow_fails_closed(tmp_path):
+    target = board(tmp_path, """
+      (segment (start -1e-200 2e-201) (end 7e-201 -1e-201) (width 0.2) (layer "F.Cu") (net 1))
+      (segment (start -9e-201 -3e-201) (end 6e-201 7e-201) (width 0.2) (layer "F.Cu") (net 2))
+    """)
+    result = check_board(target)
+    assert result["status"] == "unknown"
+    assert any(f["code"] == "dfm_clearance_numeric_unknown" for f in result["findings"])
+
+
 def test_clearance_crossing_and_layer_and_net_exclusions(tmp_path):
     result = check_board(board(tmp_path, """
       (segment (start 0 0) (end 2 0) (width 0.2) (layer "F.Cu") (net 1))
@@ -164,6 +194,30 @@ def test_unrecognized_geometry_is_not_silently_passed(tmp_path):
     assert result["status"] == "partial"
     assert any("Microvias" in gap for gap in result["unsupported"])
     assert any(f["code"] == "dfm_unsupported_item" for f in result["findings"])
+
+
+def test_review_reports_clearance_numeric_error_as_unknown(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    def git(*args):
+        return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True, timeout=30).stdout.strip()
+    git("init")
+    git("config", "user.email", "test@example.invalid")
+    git("config", "user.name", "Test")
+    target = repo / "board.kicad_pcb"
+    target.write_text('(kicad_pcb)')
+    git("add", ".")
+    git("commit", "-m", "before")
+    base = git("rev-parse", "HEAD")
+    target.write_text('(kicad_pcb '
+                      '(segment (start -1e201 2e200) (end 7e200 -1e200) (width 0.2) (layer "F.Cu") (net 1)) '
+                      '(segment (start -9e200 -3e200) (end 6e200 7e200) (width 0.2) (layer "F.Cu") (net 2)))')
+    git("commit", "-am", "after")
+    with patch("pcbgit.review.run_tool", return_value=(0, "9.0.9")), patch("pcbgit.review.kicad_file", return_value={"side": "head", "artifacts": [], "findings": []}):
+        result = review(repo, base, "HEAD", tmp_path / "report")
+    assert result["status"] == "unknown"
+    findings = result["files"][0]["sides"][-1]["findings"]
+    assert next(f for f in findings if f.get("code") == "dfm_clearance_numeric_unknown")["status"] == "unknown"
 
 
 def test_review_fails_on_dfm_violation(tmp_path):

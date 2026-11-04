@@ -23,8 +23,9 @@ PCBGit compares the merge base of the two revisions with the head revision.
 Open `pcbgit-report/index.html` for the visual report or read `report.json` for
 machine-readable results. The exit code is 0 for a pass, 1 for rule violations,
 and 2 when a required operation cannot be verified. Unchanged KiCad files are
-also checked, so changing a configuration file does not bypass checks. Git
-tree symlinks and submodules are rejected rather than followed. Reports and
+also checked, so changing a configuration file does not bypass checks. ERC runs
+on root schematics; missing, cyclic or unsupported sheet references are reported
+as unknown rather than silently skipped. Git tree symlinks and submodules are rejected rather than followed. Reports and
 CAD files from untrusted sources should be viewed in an isolated environment.
 
 Install test dependencies and run the full suite with

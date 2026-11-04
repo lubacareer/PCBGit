@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from pcbgit.review import ReviewError, changed_files, review, run_tool, snapshot, write_report
+from pcbgit.review import ReviewError, changed_files, git_environment, kicad_file, review, run_tool, schematic_roots, snapshot, write_report
 
 
 class CoreTests(unittest.TestCase):
@@ -28,7 +28,12 @@ class CoreTests(unittest.TestCase):
         self.temp.cleanup()
 
     def git(self, *args):
-        return subprocess.run(["git", "-C", str(self.repo), *args], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True).stdout
+        try:
+            return subprocess.run(["git", "-C", str(self.repo), *args], check=True,
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                  timeout=30, env=git_environment()).stdout
+        except subprocess.TimeoutExpired:
+            self.fail("Test Git command timed out")
 
     def test_git_snapshots_and_comparison(self):
         self.assertEqual(changed_files(self.repo, self.base, "HEAD"), ["board.kicad_pcb"])
@@ -51,6 +56,98 @@ class CoreTests(unittest.TestCase):
         with self.assertRaises(ReviewError):
             snapshot(self.repo, "HEAD", self.root / "snapshot")
 
+    def test_git_snapshot_ignores_inherited_repository_overrides(self):
+        overrides = {key: str(self.root / "does-not-exist") for key in (
+            "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY")}
+        with patch.dict("os.environ", overrides):
+            snapshot(self.repo, "HEAD", self.root / "snapshot")
+        self.assertEqual((self.root / "snapshot" / "board.kicad_pcb").read_text(), "after")
+
+    def test_test_helper_reports_git_timeout(self):
+        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("git", 30)):
+            with self.assertRaisesRegex(AssertionError, "timed out"):
+                self.git("status")
+
+    def test_snapshot_rejects_preexisting_destination_symlink(self):
+        nested = self.repo / "nested"
+        nested.mkdir()
+        (nested / "board.txt").write_text("inside")
+        self.git("add", "nested/board.txt")
+        self.git("commit", "-m", "add nested file")
+        destination = self.root / "snapshot"
+        destination.mkdir()
+        outside = self.root / "outside"
+        outside.mkdir()
+        try:
+            (destination / "nested").symlink_to(outside, target_is_directory=True)
+        except OSError as exc:
+            self.skipTest(f"OS does not permit creating test symlinks: {exc}")
+        with self.assertRaises(ReviewError):
+            snapshot(self.repo, "HEAD", destination)
+        self.assertFalse((outside / "board.txt").exists())
+
+    def test_snapshot_checks_resolved_target_containment(self):
+        destination = self.root / "snapshot"
+        original = Path.resolve
+        def redirect(path, *args, **kwargs):
+            if path == destination / "board.kicad_pcb":
+                return self.root / "outside.kicad_pcb"
+            return original(path, *args, **kwargs)
+        with patch.object(Path, "resolve", redirect):
+            with self.assertRaisesRegex(ReviewError, "escapes destination"):
+                snapshot(self.repo, "HEAD", destination)
+        self.assertFalse((self.root / "outside.kicad_pcb").exists())
+
+    def test_kicad_artifacts_are_never_reused_between_runs(self):
+        output = self.root / "report"
+        def first_run(args):
+            target = Path(args[args.index("--output") + 1])
+            target.write_text("<svg/>" if args[3] == "svg" else "{}", encoding="utf-8")
+            return 0, ""
+        with patch("pcbgit.review.run_tool", side_effect=first_run):
+            first = kicad_file(self.repo / "board.kicad_pcb", "board.kicad_pcb", output, "head", True)
+        self.assertEqual(len(first["artifacts"]), 2)
+        with patch("pcbgit.review.run_tool", return_value=(0, "")):
+            second = kicad_file(self.repo / "board.kicad_pcb", "board.kicad_pcb", output, "head", True)
+        self.assertFalse(second["artifacts"])
+        self.assertEqual([item["status"] for item in second["findings"]], ["unknown", "unknown"])
+
+    def test_changed_child_triggers_root_check_only(self):
+        (self.repo / "root.kicad_sch").write_text(
+            '(kicad_sch (sheet (property "Sheetfile" "child.kicad_sch")))', encoding="utf-8")
+        child = self.repo / "child.kicad_sch"
+        child.write_text('(kicad_sch)', encoding="utf-8")
+        self.git("add", "root.kicad_sch", "child.kicad_sch")
+        self.git("commit", "-m", "add hierarchy")
+        base = self.git("rev-parse", "HEAD").strip()
+        child.write_text('(kicad_sch (text "changed"))', encoding="utf-8")
+        self.git("commit", "-am", "change child")
+        def fake_kicad(path, name, output, side, check):
+            return {"side": side, "artifacts": [], "findings": []}
+        with patch("pcbgit.review.run_tool", return_value=(0, "9.0.9")), \
+             patch("pcbgit.review.kicad_file", side_effect=fake_kicad) as called:
+            result = review(self.repo, base, "HEAD", self.root / "report")
+        calls = {c.args[1]: c.kwargs["check"] for c in called.call_args_list if c.args[3] == "head"}
+        self.assertTrue(calls["root.kicad_sch"])
+        self.assertFalse(calls["child.kicad_sch"])
+        self.assertEqual(result["status"], "pass")
+
+    def test_hierarchy_missing_or_cyclic_files_are_unknown(self):
+        root = self.root / "schematics"
+        root.mkdir()
+        (root / "main.kicad_sch").write_text('(kicad_sch (sheet (property "Sheetfile" "missing.kicad_sch")))')
+        roots, findings = schematic_roots(root)
+        self.assertEqual(roots, set())
+        self.assertEqual(findings[0]["status"], "unknown")
+        (root / "missing.kicad_sch").write_text('(kicad_sch (sheet (property "Sheet file" "main.kicad_sch")))')
+        roots, findings = schematic_roots(root)
+        self.assertEqual(roots, set())
+        self.assertIn("cycle", findings[0]["message"])
+        (root / "missing.kicad_sch").write_text('(kicad_sch (sheet')
+        roots, findings = schematic_roots(root)
+        self.assertEqual(roots, set())
+        self.assertEqual(findings[0]["status"], "unknown")
+
     def test_missing_kicad_is_not_a_pass(self):
         with patch("pcbgit.review.run_tool", return_value=(None, "not installed")):
             result = review(self.repo, self.base, "HEAD", self.root / "report")
@@ -58,10 +155,11 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(json.loads((self.root / "report" / "report.json").read_text())["head"], result["head"])
 
     def test_report_escapes_untrusted_text(self):
-        result = {"status": "unknown", "base": "a", "head": "b", "files": [{"path": "<script>", "sides": []}]}
+        result = {"status": "unknown", "base": "a", "head": "b", "findings": [{"status": "unknown", "message": "<bad hierarchy>"}], "files": [{"path": "<script>", "sides": []}]}
         write_report(result, self.root / "report")
         page = (self.root / "report" / "index.html").read_text()
         self.assertIn("&lt;script&gt;", page)
+        self.assertIn("&lt;bad hierarchy&gt;", page)
         self.assertNotIn("<script>", page)
 
     def test_invalid_ref_fails(self):

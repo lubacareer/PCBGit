@@ -133,6 +133,31 @@ def run_tool(args: list[str]) -> tuple[int | None, str]:
         return None, str(exc)
 
 
+
+def inner_copper_layers(path: Path) -> list[str]:
+    """Return enabled canonical inner-copper layers from a KiCad board."""
+    board = _parse(path.read_text(encoding="utf-8-sig"))
+    if not board or board[0] != "kicad_pcb":
+        raise ValueError("not a KiCad board")
+    sections = [node for node in board if isinstance(node, list) and node and node[0] == "layers"]
+    if len(sections) != 1:
+        raise ValueError("board has missing or ambiguous layers")
+    inner = []
+    for entry in sections[0][1:]:
+        if not isinstance(entry, list) or len(entry) < 2:
+            raise ValueError("invalid board layer entry")
+        try:
+            number = int(entry[0])
+        except (TypeError, ValueError) as exc:
+            raise ValueError("invalid board layer number") from exc
+        # Canonical names remain accepted even when a layer has a custom name.
+        if 1 <= number <= 30:
+            inner.append(f"In{number}.Cu")
+    if len(inner) != len(set(inner)):
+        raise ValueError("duplicate inner copper layer")
+    return sorted(inner, key=lambda name: int(name[2:-3]))
+
+
 def kicad_file(path: Path, relative: str, output: Path, side: str, check: bool) -> dict:
     """Render one snapshot and optionally run its KiCad design rule check."""
     kind = "pcb" if path.suffix.lower() == ".kicad_pcb" else "sch"
@@ -152,6 +177,21 @@ def kicad_file(path: Path, relative: str, output: Path, side: str, check: bool) 
             findings.append({"status": "unknown", "message": "KiCad produced no SVG output."})
     else:
         findings.append({"status": "unknown", "message": f"SVG export failed: {log}"})
+    if kind == "pcb":
+        try:
+            inner = inner_copper_layers(path)
+        except (OSError, UnicodeError, ValueError, RecursionError) as exc:
+            inner = []
+            findings.append({"status": "unknown", "message": f"Cannot determine inner copper layers: {exc}"})
+        for layer in inner:
+            layer_svg = dest / f"layer-{layer}.svg"
+            code, log = run_tool(["kicad-cli", "pcb", "export", "svg", "--layers",
+                                  f"{layer},Edge.Cuts", "--mode-single", "--output",
+                                  str(layer_svg), str(path)])
+            if code == 0 and layer_svg.is_file():
+                artifacts.append(layer_svg.relative_to(output).as_posix())
+            else:
+                findings.append({"status": "unknown", "message": f"SVG export failed for {layer}: {log}"})
     if check:
         name = "DRC" if kind == "pcb" else "ERC"
         report = dest / f"{name.lower()}.json"
@@ -190,7 +230,7 @@ def write_report(result: dict, output: Path) -> None:
             parts.append(f"<div class='image'><h3>{esc(side['side'])}</h3>")
             for artifact in side.get("artifacts", []):
                 if artifact.endswith(".svg"):
-                    parts.append(f"<img src='{esc(artifact)}' alt='{esc(side['side'])} rendering'>")
+                    parts.append(f"<p>{esc(Path(artifact).name)}</p><img src='{esc(artifact)}' alt='{esc(side['side'])} rendering'>")
                 else:
                     parts.append(f"<p><a href='{esc(artifact)}'>Download details</a></p>")
             for finding in side.get("findings", []):

@@ -1,11 +1,13 @@
 import json
+import shutil
 from pathlib import Path
 import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
 
-from pcbgit.review import ReviewError, changed_files, git_environment, kicad_file, review, run_tool, schematic_roots, snapshot, write_report
+from pcbgit.review import ReviewError, changed_files, git_environment, inner_copper_layers, kicad_file, review, run_tool, schematic_roots, snapshot, write_report
+from pcbgit.sexpr import _parse
 
 
 class CoreTests(unittest.TestCase):
@@ -100,6 +102,7 @@ class CoreTests(unittest.TestCase):
 
     def test_kicad_artifacts_are_never_reused_between_runs(self):
         output = self.root / "report"
+        (self.repo / "board.kicad_pcb").write_text('(kicad_pcb (layers (0 "F.Cu" signal) (31 "B.Cu" signal)))')
         def first_run(args):
             target = Path(args[args.index("--output") + 1])
             target.write_text("<svg/>" if args[3] == "svg" else "{}", encoding="utf-8")
@@ -111,6 +114,71 @@ class CoreTests(unittest.TestCase):
             second = kicad_file(self.repo / "board.kicad_pcb", "board.kicad_pcb", output, "head", True)
         self.assertFalse(second["artifacts"])
         self.assertEqual([item["status"] for item in second["findings"]], ["unknown", "unknown"])
+
+
+    def test_sexpression_decodes_kicad_escaped_utf8(self):
+        self.assertEqual(_parse(r'(root "a\"b" "c\\d" "\q" "\n\r\t" "\xc3\xa9" "\303\251")'),
+                         ["root", 'a"b', 'c\\d', '\\q', '\n\r\t', chr(0xe9), chr(0xe9)])
+        with self.assertRaisesRegex(ValueError, "invalid UTF-8"):
+            _parse(r'(root "\xff")')
+
+    def test_hierarchy_resolves_escaped_filenames_but_rejects_escaping_path(self):
+        root = self.root / "escaped"
+        root.mkdir()
+        (root / "child.kicad_sch").write_text('(kicad_sch)', encoding="utf-8")
+        (root / "main.kicad_sch").write_text(
+            r'(kicad_sch (sheet (property "Sheetfile" "\x63hild.kicad_sch")))', encoding="utf-8")
+        self.assertEqual(schematic_roots(root), ({"main.kicad_sch"}, []))
+        (root / "main.kicad_sch").write_text(
+            r'(kicad_sch (sheet (property "Sheetfile" "\x2e\x2e/outside.kicad_sch")))', encoding="utf-8")
+        self.assertEqual(schematic_roots(root)[1][0]["status"], "unknown")
+
+    def test_inner_copper_layers_are_exported_individually(self):
+        board = self.root / "multi.kicad_pcb"
+        board.write_text('(kicad_pcb (layers (0 "F.Cu" signal) (1 "In1.Cu" power) '
+                         '(2 "In2.Cu" signal "Power Plane") (31 "B.Cu" signal)))', encoding="utf-8")
+        self.assertEqual(inner_copper_layers(board), ["In1.Cu", "In2.Cu"])
+        calls = []
+        def fake_tool(args):
+            calls.append(args)
+            Path(args[args.index("--output") + 1]).write_text("<svg/>", encoding="utf-8")
+            return 0, ""
+        with patch("pcbgit.review.run_tool", side_effect=fake_tool):
+            result = kicad_file(board, board.name, self.root / "report", "head", False)
+        self.assertEqual(len(result["artifacts"]), 3)
+        self.assertEqual([call[call.index("--layers") + 1] for call in calls],
+                         ["F.Cu,B.Cu,Edge.Cuts,F.Silkscreen,B.Silkscreen",
+                          "In1.Cu,Edge.Cuts", "In2.Cu,Edge.Cuts"])
+        self.assertFalse(result["findings"])
+        report = {"status": "pass", "base": "a", "head": "b", "files": [{"path": board.name, "sides": [result]}]}
+        write_report(report, self.root / "report")
+        self.assertIn("layer-In1.Cu.svg", (self.root / "report" / "index.html").read_text(encoding="utf-8"))
+
+    @unittest.skipUnless(shutil.which("kicad-cli"), "KiCad CLI is not installed")
+    def test_real_kicad_exports_inner_copper_layers(self):
+        board = Path(__file__).parent / "fixtures" / "four-layer.kicad_pcb"
+        result = kicad_file(board, board.name, self.root / "report", "head", False)
+        self.assertEqual(result["findings"], [])
+        self.assertEqual({Path(path).name for path in result["artifacts"]},
+                         {"board.svg", "layer-In1.Cu.svg", "layer-In2.Cu.svg"})
+        self.assertTrue(all((self.root / "report" / path).stat().st_size > 0 for path in result["artifacts"]))
+
+    def test_inner_layer_parser_and_export_failure_report_unknown(self):
+        board = self.root / "multi.kicad_pcb"
+        board.write_text('(kicad_pcb (layers (1 "In1.Cu" power)))', encoding="utf-8")
+        def fake_tool(args):
+            if "In1.Cu,Edge.Cuts" in args:
+                return 1, "failure"
+            Path(args[args.index("--output") + 1]).write_text("<svg/>", encoding="utf-8")
+            return 0, ""
+        with patch("pcbgit.review.run_tool", side_effect=fake_tool):
+            result = kicad_file(board, board.name, self.root / "report", "head", False)
+        self.assertEqual(result["findings"][0]["status"], "unknown")
+        self.assertIn("In1.Cu", result["findings"][0]["message"])
+        board.write_text('(kicad_pcb)')
+        with patch("pcbgit.review.run_tool", side_effect=fake_tool):
+            result = kicad_file(board, board.name, self.root / "report2", "head", False)
+        self.assertEqual(result["findings"][0]["status"], "unknown")
 
     def test_changed_child_triggers_root_check_only(self):
         (self.repo / "root.kicad_sch").write_text(

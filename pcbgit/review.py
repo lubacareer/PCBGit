@@ -12,8 +12,9 @@ import subprocess
 import tempfile
 
 from .geometry import GERBER_EXTENSIONS, STEP_EXTENSIONS, compare_files
-from .dfm import _parse, check_board
+from .dfm import check_board
 from .inventory import check_inventory
+from .sexpr import _parse
 
 
 class ReviewError(Exception):
@@ -21,6 +22,7 @@ class ReviewError(Exception):
 
 
 def git_environment() -> dict[str, str]:
+    """Prevent inherited Git location overrides from changing the target repo."""
     environment = os.environ.copy()
     for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
                 "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_PREFIX"):
@@ -29,6 +31,7 @@ def git_environment() -> dict[str, str]:
 
 
 def git(repo: Path, *args: str) -> bytes:
+    """Run Git against the selected repository with a bounded execution time."""
     try:
         return subprocess.run(["git", "-C", str(repo), *args], check=True,
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120,
@@ -38,6 +41,7 @@ def git(repo: Path, *args: str) -> bytes:
 
 
 def snapshot(repo: Path, ref: str, destination: Path) -> str:
+    """Extract committed regular blobs, rejecting paths outside the destination."""
     commit = git(repo, "rev-parse", "--verify", "--end-of-options", f"{ref}^{{commit}}").decode().strip()
     # git archive honors untrusted export-ignore attributes; enumerating the
     # committed tree prevents a change from hiding a design from its review.
@@ -78,6 +82,9 @@ def snapshot(repo: Path, ref: str, destination: Path) -> str:
     except (OSError, subprocess.SubprocessError) as exc:
         raise ReviewError(f"Git object extraction failed: {exc}") from exc
     destination.mkdir(parents=True, exist_ok=True)
+    if destination.is_symlink():
+        raise ReviewError("Snapshot destination must not be a symlink")
+    resolved_destination = destination.resolve()
     position = 0
     for name, oid, size in files:
         end_header = batch.find(b"\n", position)
@@ -88,7 +95,20 @@ def snapshot(repo: Path, ref: str, destination: Path) -> str:
         if end >= len(batch) or batch[end:end + 1] != b"\n":
             raise ReviewError(f"Incomplete Git object for {name}")
         target = destination.joinpath(*PurePosixPath(name).parts)
-        target.parent.mkdir(parents=True, exist_ok=True)
+        # Never follow pre-existing symlinks in a reused destination, even if
+        # they happen to point inside it. Check resolved containment before and
+        # after creating directories so a path cannot escape the snapshot root.
+        current = destination
+        for component in PurePosixPath(name).parts:
+            current = current / component
+            if current.is_symlink() or getattr(current, "is_junction", lambda: False)():
+                raise ReviewError(f"Symlink in snapshot destination: {name}")
+        try:
+            target.resolve().relative_to(resolved_destination)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.resolve().relative_to(resolved_destination)
+        except (ValueError, OSError) as exc:
+            raise ReviewError(f"Snapshot path escapes destination: {name}") from exc
         target.write_bytes(batch[start:end])
         position = end + 1
     if position != len(batch):
@@ -97,11 +117,13 @@ def snapshot(repo: Path, ref: str, destination: Path) -> str:
 
 
 def changed_files(repo: Path, base: str, head: str) -> list[str]:
+    """List changed repository paths without relying on rename detection."""
     raw = git(repo, "diff", "--name-only", "-z", "--no-renames", base, head, "--")
     return [p.decode("utf-8", "surrogateescape") for p in raw.split(b"\0") if p]
 
 
 def run_tool(args: list[str]) -> tuple[int | None, str]:
+    """Run a CAD tool without inherited distributor secrets; bound its output."""
     try:
         environment = os.environ.copy()
         for key in ("DIGIKEY_CLIENT_ID", "DIGIKEY_CLIENT_SECRET", "DIGIKEY_ACCESS_TOKEN",
@@ -115,11 +137,11 @@ def run_tool(args: list[str]) -> tuple[int | None, str]:
 
 
 def kicad_file(path: Path, relative: str, output: Path, side: str, check: bool) -> dict:
+    """Render one snapshot and optionally run its KiCad design rule check."""
     kind = "pcb" if path.suffix.lower() == ".kicad_pcb" else "sch"
     digest = hashlib.sha256(relative.encode("utf-8", "surrogateescape")).hexdigest()[:16]
     output.mkdir(parents=True, exist_ok=True)
-    # Use a fresh directory every invocation, so a successful command that
-    # produces no output cannot accidentally reuse last run's artifacts.
+    # A fresh directory prevents stale SVG or check reports from being reused.
     dest = Path(tempfile.mkdtemp(prefix=f"pcbgit-{digest}-{side}-", dir=output))
     artifacts, findings = [], []
     if kind == "pcb":
@@ -155,6 +177,7 @@ def kicad_file(path: Path, relative: str, output: Path, side: str, check: bool) 
 
 
 def write_report(result: dict, output: Path) -> None:
+    """Write machine-readable and HTML reports, escaping untrusted labels."""
     output.mkdir(parents=True, exist_ok=True)
     (output / "report.json").write_text(json.dumps(result, indent=2, ensure_ascii=True), encoding="utf-8")
     esc = lambda value: html.escape(str(value), quote=True)
@@ -241,6 +264,7 @@ def schematic_roots(root: Path) -> tuple[set[str], list[dict]]:
 
 def review(repo: Path, base_ref: str, head_ref: str, output: Path, profile: str | None = None,
            bom: str | None = None, build_quantity: int = 1, skip_inventory: bool = False) -> dict:
+    """Compare merge-base and head snapshots and check all head designs."""
     repo, output = repo.resolve(), output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="pcbgit-") as temp:

@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from pcbgit.review import ReviewError, changed_files, kicad_file, review, run_tool, schematic_roots, snapshot, write_report
+from pcbgit.review import ReviewError, changed_files, git_environment, kicad_file, review, run_tool, schematic_roots, snapshot, write_report
 
 
 class CoreTests(unittest.TestCase):
@@ -28,7 +28,12 @@ class CoreTests(unittest.TestCase):
         self.temp.cleanup()
 
     def git(self, *args):
-        return subprocess.run(["git", "-C", str(self.repo), *args], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True).stdout
+        try:
+            return subprocess.run(["git", "-C", str(self.repo), *args], check=True,
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                  timeout=30, env=git_environment()).stdout
+        except subprocess.TimeoutExpired:
+            self.fail("Test Git command timed out")
 
     def test_git_snapshots_and_comparison(self):
         self.assertEqual(changed_files(self.repo, self.base, "HEAD"), ["board.kicad_pcb"])
@@ -58,6 +63,41 @@ class CoreTests(unittest.TestCase):
             snapshot(self.repo, "HEAD", self.root / "snapshot")
         self.assertEqual((self.root / "snapshot" / "board.kicad_pcb").read_text(), "after")
 
+    def test_test_helper_reports_git_timeout(self):
+        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("git", 30)):
+            with self.assertRaisesRegex(AssertionError, "timed out"):
+                self.git("status")
+
+    def test_snapshot_rejects_preexisting_destination_symlink(self):
+        nested = self.repo / "nested"
+        nested.mkdir()
+        (nested / "board.txt").write_text("inside")
+        self.git("add", "nested/board.txt")
+        self.git("commit", "-m", "add nested file")
+        destination = self.root / "snapshot"
+        destination.mkdir()
+        outside = self.root / "outside"
+        outside.mkdir()
+        try:
+            (destination / "nested").symlink_to(outside, target_is_directory=True)
+        except OSError as exc:
+            self.skipTest(f"OS does not permit creating test symlinks: {exc}")
+        with self.assertRaises(ReviewError):
+            snapshot(self.repo, "HEAD", destination)
+        self.assertFalse((outside / "board.txt").exists())
+
+    def test_snapshot_checks_resolved_target_containment(self):
+        destination = self.root / "snapshot"
+        original = Path.resolve
+        def redirect(path, *args, **kwargs):
+            if path == destination / "board.kicad_pcb":
+                return self.root / "outside.kicad_pcb"
+            return original(path, *args, **kwargs)
+        with patch.object(Path, "resolve", redirect):
+            with self.assertRaisesRegex(ReviewError, "escapes destination"):
+                snapshot(self.repo, "HEAD", destination)
+        self.assertFalse((self.root / "outside.kicad_pcb").exists())
+
     def test_kicad_artifacts_are_never_reused_between_runs(self):
         output = self.root / "report"
         def first_run(args):
@@ -72,18 +112,22 @@ class CoreTests(unittest.TestCase):
         self.assertFalse(second["artifacts"])
         self.assertEqual([item["status"] for item in second["findings"]], ["unknown", "unknown"])
 
-    def test_hierarchical_schematic_checks_only_root_but_renders_children(self):
+    def test_changed_child_triggers_root_check_only(self):
         (self.repo / "root.kicad_sch").write_text(
             '(kicad_sch (sheet (property "Sheetfile" "child.kicad_sch")))', encoding="utf-8")
-        (self.repo / "child.kicad_sch").write_text('(kicad_sch)', encoding="utf-8")
+        child = self.repo / "child.kicad_sch"
+        child.write_text('(kicad_sch)', encoding="utf-8")
         self.git("add", "root.kicad_sch", "child.kicad_sch")
         self.git("commit", "-m", "add hierarchy")
+        base = self.git("rev-parse", "HEAD").strip()
+        child.write_text('(kicad_sch (text "changed"))', encoding="utf-8")
+        self.git("commit", "-am", "change child")
         def fake_kicad(path, name, output, side, check):
             return {"side": side, "artifacts": [], "findings": []}
         with patch("pcbgit.review.run_tool", return_value=(0, "9.0.9")), \
              patch("pcbgit.review.kicad_file", side_effect=fake_kicad) as called, \
              patch("pcbgit.review.check_board", return_value={"status": "partial", "profile": None, "supported": [], "unsupported": [], "findings": []}):
-            result = review(self.repo, self.base, "HEAD", self.root / "report", skip_inventory=True)
+            result = review(self.repo, base, "HEAD", self.root / "report", skip_inventory=True)
         calls = {c.args[1]: c.kwargs["check"] for c in called.call_args_list if c.args[3] == "head"}
         self.assertTrue(calls["root.kicad_sch"])
         self.assertFalse(calls["child.kicad_sch"])
@@ -112,15 +156,44 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(json.loads((self.root / "report" / "report.json").read_text())["head"], result["head"])
 
     def test_report_escapes_untrusted_text(self):
-        result = {"status": "unknown", "base": "a", "head": "b", "files": [{"path": "<script>", "sides": []}]}
+        result = {"status": "unknown", "base": "a", "head": "b", "findings": [{"status": "unknown", "message": "<bad hierarchy>"}], "files": [{"path": "<script>", "sides": []}]}
         write_report(result, self.root / "report")
         page = (self.root / "report" / "index.html").read_text()
         self.assertIn("&lt;script&gt;", page)
+        self.assertIn("&lt;bad hierarchy&gt;", page)
         self.assertNotIn("<script>", page)
 
     def test_invalid_ref_fails(self):
         with self.assertRaises(ReviewError):
             snapshot(self.repo, "does-not-exist", self.root / "snapshot")
+
+    def test_cad_subprocess_does_not_inherit_distributor_credentials(self):
+        secrets = {key: "private" for key in ("DIGIKEY_CLIENT_ID", "DIGIKEY_CLIENT_SECRET",
+                   "DIGIKEY_ACCESS_TOKEN", "DIGIKEY_ACCOUNT_ID", "MOUSER_API_KEY")}
+        with patch.dict("os.environ", secrets), patch("pcbgit.review.subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess(["kicad-cli"], 0, "ok")
+            self.assertEqual(run_tool(["kicad-cli", "version"]), (0, "ok"))
+            environment = run.call_args.kwargs["env"]
+        self.assertTrue(all(key not in environment for key in secrets))
+
+
+    def test_hierarchical_schematic_checks_only_root_but_renders_children(self):
+        (self.repo / "root.kicad_sch").write_text(
+            '(kicad_sch (sheet (property "Sheetfile" "child.kicad_sch")))', encoding="utf-8")
+        (self.repo / "child.kicad_sch").write_text('(kicad_sch)', encoding="utf-8")
+        self.git("add", "root.kicad_sch", "child.kicad_sch")
+        self.git("commit", "-m", "add hierarchy")
+        def fake_kicad(path, name, output, side, check):
+            return {"side": side, "artifacts": [], "findings": []}
+        with patch("pcbgit.review.run_tool", return_value=(0, "9.0.9")), \
+             patch("pcbgit.review.kicad_file", side_effect=fake_kicad) as called, \
+             patch("pcbgit.review.check_board", return_value={"status": "partial", "profile": None, "supported": [], "unsupported": [], "findings": []}):
+            result = review(self.repo, self.base, "HEAD", self.root / "report", skip_inventory=True)
+        calls = {c.args[1]: c.kwargs["check"] for c in called.call_args_list if c.args[3] == "head"}
+        self.assertTrue(calls["root.kicad_sch"])
+        self.assertFalse(calls["child.kicad_sch"])
+        self.assertEqual(result["status"], "pass")
+
 
     def test_inventory_uses_committed_bom_and_fails_closed(self):
         bom = self.repo / "bom.csv"
@@ -136,15 +209,6 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(missing["status"], "fail")
             skipped = review(self.repo, self.base, "HEAD", self.root / "report3", skip_inventory=True)
             self.assertEqual(skipped["inventory"]["status"], "skipped")
-
-    def test_cad_subprocess_does_not_inherit_distributor_credentials(self):
-        secrets = {key: "private" for key in ("DIGIKEY_CLIENT_ID", "DIGIKEY_CLIENT_SECRET",
-                   "DIGIKEY_ACCESS_TOKEN", "DIGIKEY_ACCOUNT_ID", "MOUSER_API_KEY")}
-        with patch.dict("os.environ", secrets), patch("pcbgit.review.subprocess.run") as run:
-            run.return_value = subprocess.CompletedProcess(["kicad-cli"], 0, "ok")
-            self.assertEqual(run_tool(["kicad-cli", "version"]), (0, "ok"))
-            environment = run.call_args.kwargs["env"]
-        self.assertTrue(all(key not in environment for key in secrets))
 
 
 if __name__ == "__main__":

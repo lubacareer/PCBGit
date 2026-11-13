@@ -14,9 +14,10 @@ def main(argv=None):
     cmd.add_argument("--base", required=True, help="Base Git revision")
     cmd.add_argument("--head", default="HEAD", help="Head Git revision")
     cmd.add_argument("--output", type=Path, default=Path("pcbgit-report"))
+    cmd.add_argument("--profile", help="Repository-relative JSON DFM profile at the head revision")
     args = parser.parse_args(argv)
     try:
-        result = review(args.repo, args.base, args.head, args.output)
+        result = review(args.repo, args.base, args.head, args.output, profile=args.profile)
     except (ReviewError, OSError, ValueError) as exc:
         print(f"PCBGit error: {exc}", file=sys.stderr)
         return 2

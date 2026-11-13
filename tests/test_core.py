@@ -205,7 +205,8 @@ class CoreTests(unittest.TestCase):
         def fake_kicad(path, name, output, side, check):
             return {"side": side, "artifacts": [], "findings": []}
         with patch("pcbgit.review.run_tool", return_value=(0, "9.0.9")), \
-             patch("pcbgit.review.kicad_file", side_effect=fake_kicad) as called:
+             patch("pcbgit.review.kicad_file", side_effect=fake_kicad) as called, \
+             patch("pcbgit.review.check_board", return_value={"status": "partial", "profile": None, "supported": [], "unsupported": [], "findings": []}):
             result = review(self.repo, base, "HEAD", self.root / "report")
         calls = {c.args[1]: c.kwargs["check"] for c in called.call_args_list if c.args[3] == "head"}
         self.assertTrue(calls["root.kicad_sch"])

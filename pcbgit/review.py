@@ -12,6 +12,7 @@ import subprocess
 import tempfile
 
 from .geometry import GERBER_EXTENSIONS, STEP_EXTENSIONS, compare_files
+from .dfm import check_board
 from .sexpr import _parse
 
 
@@ -254,6 +255,13 @@ def write_report(result: dict, output: Path) -> None:
     (output / "index.html").write_text("".join(parts), encoding="utf-8")
 
 
+def snapshot_path(root: Path, value: str) -> Path:
+    path = PurePosixPath(value)
+    if path.is_absolute() or not path.parts or ".." in path.parts or "\\" in value or ":" in value:
+        raise ReviewError("Configured paths must be relative paths within the repository")
+    return root.joinpath(*path.parts)
+
+
 def schematic_roots(root: Path) -> tuple[set[str], list[dict]]:
     """Identify root sheets; never infer roots from an incomplete hierarchy."""
     paths = {path.relative_to(root).as_posix(): path for path in root.rglob("*")
@@ -300,8 +308,7 @@ def schematic_roots(root: Path) -> tuple[set[str], list[dict]]:
     return roots, []
 
 
-
-def review(repo: Path, base_ref: str, head_ref: str, output: Path) -> dict:
+def review(repo: Path, base_ref: str, head_ref: str, output: Path, profile: str | None = None) -> dict:
     """Compare merge-base and head snapshots and check all head designs."""
     repo, output = repo.resolve(), output.resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -312,6 +319,7 @@ def review(repo: Path, base_ref: str, head_ref: str, output: Path) -> dict:
         base_commit = git(repo, "merge-base", base_tip, head_commit).decode().strip()
         snapshot(repo, base_commit, root / "base")
         snapshot(repo, head_commit, root / "head")
+        profile_path = snapshot_path(root / "head", profile) if profile else None
         version_code, version = run_tool(["kicad-cli", "version"])
         supported = version_code == 0 and version.strip().split(".")[0] == "9"
         result = {"schema_version": 1, "base": base_commit, "head": head_commit,
@@ -355,6 +363,19 @@ def review(repo: Path, base_ref: str, head_ref: str, output: Path) -> dict:
                 if name not in changed_set:
                     check = path.suffix.lower() == ".kicad_pcb" or name in roots
                     result["files"].append({"path": name, "sides": [kicad_file(path, name, output, "head", check=check)]})
+        for item in result["files"]:
+            if PurePosixPath(item["path"]).suffix.lower() != ".kicad_pcb":
+                continue
+            board = root / "head" / Path(*PurePosixPath(item["path"]).parts)
+            if not board.is_file():
+                continue
+            dfm = check_board(board, profile_path)
+            status = {"failed": "fail", "unknown": "unknown", "partial": "info"}[dfm["status"]]
+            findings = [{"status": "info", "message": "DFM coverage is partial; unsupported checks require independent review.",
+                         "evidence": {"profile": dfm["profile"], "supported": dfm["supported"], "unsupported": dfm["unsupported"]}}]
+            findings.extend({**f, "status": f.get("status", status if f.get("severity") == "error" else "info")}
+                            for f in dfm["findings"])
+            item["sides"].append({"side": "DFM", "artifacts": [], "findings": findings})
         statuses = [f.get("status") for f in result["findings"]]
         statuses.extend(f.get("status") for item in result["files"] for side in item["sides"] for f in side["findings"])
         result["status"] = "fail" if "fail" in statuses else "unknown" if "unknown" in statuses else "pass"

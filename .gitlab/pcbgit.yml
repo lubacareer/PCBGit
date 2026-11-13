@@ -1,0 +1,47 @@
+# Build and publish the repository's Dockerfile from a trusted PCBGit revision,
+# then set PCBGIT_IMAGE to that immutable image reference in your project.
+# Make distributor variables protected and restrict their use to trusted refs.
+# Never run untrusted merge-request code with protected variables enabled.
+pcbgit-review:
+  image:
+    name: $PCBGIT_IMAGE
+    entrypoint: [""]
+  variables:
+    GIT_DEPTH: "0"
+  script:
+    - |
+      set -eu
+      base="${CI_MERGE_REQUEST_DIFF_BASE_SHA:-}"
+      before="${CI_COMMIT_BEFORE_SHA:-}"
+      if [ -z "$base" ] && [ -n "$before" ] && [ "$before" != "0000000000000000000000000000000000000000" ]; then
+        if ! git cat-file -e "${before}^{commit}" 2>/dev/null; then
+          echo 'PCBGit cannot access CI_COMMIT_BEFORE_SHA; fetch the prior commit and retry.' >&2
+          exit 2
+        fi
+        if ! git merge-base --is-ancestor "$before" "$CI_COMMIT_SHA"; then
+          echo 'PCBGit cannot review a non-fast-forward push using a merge-base; run an explicit comparison.' >&2
+          exit 2
+        fi
+        base="$before"
+      fi
+      if [ -z "$base" ]; then
+        if [ -n "${CI_DEFAULT_BRANCH:-}" ] && [ "${CI_COMMIT_BRANCH:-}" != "${CI_DEFAULT_BRANCH}" ]; then
+          git check-ref-format "refs/remotes/origin/${CI_DEFAULT_BRANCH}" >/dev/null
+          git fetch --no-tags origin "+refs/heads/${CI_DEFAULT_BRANCH}:refs/remotes/origin/${CI_DEFAULT_BRANCH}"
+          base="refs/remotes/origin/${CI_DEFAULT_BRANCH}"
+        else
+          base=':empty:'
+        fi
+      fi
+      set -- review --base "$base" --head "$CI_COMMIT_SHA" --output pcbgit-report --build-quantity "${PCBGIT_BUILD_QUANTITY:-1}"
+      if [ -n "${PCBGIT_BOM:-}" ]; then set -- "$@" --bom "$PCBGIT_BOM"; fi
+      if [ -n "${PCBGIT_PROFILE:-}" ]; then set -- "$@" --profile "$PCBGIT_PROFILE"; fi
+      if [ "${CI_PIPELINE_SOURCE:-}" = "merge_request_event" ] && { [ -z "${CI_MERGE_REQUEST_SOURCE_PROJECT_ID:-}" ] || [ "${CI_MERGE_REQUEST_SOURCE_PROJECT_ID}" != "${CI_MERGE_REQUEST_TARGET_PROJECT_ID:-}" ]; }; then
+        unset DIGIKEY_CLIENT_ID DIGIKEY_CLIENT_SECRET DIGIKEY_ACCESS_TOKEN DIGIKEY_ACCOUNT_ID MOUSER_API_KEY
+        set -- "$@" --skip-inventory
+      fi
+      pcbgit "$@"
+  artifacts:
+    when: always
+    paths:
+      - pcbgit-report/

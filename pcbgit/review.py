@@ -13,6 +13,7 @@ import tempfile
 
 from .geometry import GERBER_EXTENSIONS, STEP_EXTENSIONS, compare_files
 from .dfm import check_board
+from .inventory import check_inventory
 from .sexpr import _parse
 
 
@@ -236,6 +237,9 @@ def write_report(result: dict, output: Path) -> None:
              f"<p>Base: {esc(result['base'])}<br>Head: {esc(result['head'])}</p>"]
     for finding in result.get("findings", []):
         parts.append(f"<p class='{esc(finding.get('status', ''))}'>{esc(finding.get('message', ''))}</p>")
+    if "inventory" in result:
+        inv = result["inventory"]
+        parts.append(f"<section><h2>Inventory: {esc(inv['status'])}</h2><pre>{esc(json.dumps(inv['findings'], indent=2, ensure_ascii=True))}</pre></section>")
     for item in result.get("files", []):
         parts.append(f"<section><h2>{esc(item['path'])}</h2><div class='images'>")
         for side in item.get("sides", []):
@@ -308,16 +312,21 @@ def schematic_roots(root: Path) -> tuple[set[str], list[dict]]:
     return roots, []
 
 
-def review(repo: Path, base_ref: str, head_ref: str, output: Path, profile: str | None = None) -> dict:
+def review(repo: Path, base_ref: str, head_ref: str, output: Path, profile: str | None = None,
+           bom: str | None = None, build_quantity: int = 1, skip_inventory: bool = False) -> dict:
     """Compare merge-base and head snapshots and check all head designs."""
     repo, output = repo.resolve(), output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="pcbgit-") as temp:
         root = Path(temp)
-        base_tip = git(repo, "rev-parse", "--verify", "--end-of-options", f"{base_ref}^{{commit}}").decode().strip()
         head_commit = git(repo, "rev-parse", "--verify", "--end-of-options", f"{head_ref}^{{commit}}").decode().strip()
-        base_commit = git(repo, "merge-base", base_tip, head_commit).decode().strip()
-        snapshot(repo, base_commit, root / "base")
+        if base_ref == ":empty:":
+            base_commit = ":empty:"
+            (root / "base").mkdir()
+        else:
+            base_tip = git(repo, "rev-parse", "--verify", "--end-of-options", f"{base_ref}^{{commit}}").decode().strip()
+            base_commit = git(repo, "merge-base", base_tip, head_commit).decode().strip()
+            snapshot(repo, base_commit, root / "base")
         snapshot(repo, head_commit, root / "head")
         profile_path = snapshot_path(root / "head", profile) if profile else None
         version_code, version = run_tool(["kicad-cli", "version"])
@@ -328,7 +337,11 @@ def review(repo: Path, base_ref: str, head_ref: str, output: Path, profile: str 
         result["findings"].extend(hierarchy_findings)
         if not supported:
             result["findings"].append({"status": "unknown", "message": f"KiCad 9 is required: {version.strip()}"})
-        changed = changed_files(repo, base_commit, head_commit)
+        if base_ref == ":empty:":
+            raw = git(repo, "ls-tree", "-r", "-z", "--name-only", head_commit)
+            changed = [p.decode("utf-8", "surrogateescape") for p in raw.split(b"\0") if p]
+        else:
+            changed = changed_files(repo, base_commit, head_commit)
         for name in changed:
             relative = PurePosixPath(name)
             if relative.suffix.lower() in STEP_EXTENSIONS | GERBER_EXTENSIONS:
@@ -338,7 +351,7 @@ def review(repo: Path, base_ref: str, head_ref: str, output: Path, profile: str 
                 comparison = compare_files(old if old.is_file() else None, new if new.is_file() else None,
                                            output / "assets" / digest / "comparison")
                 status = "pass" if comparison["status"] == "ok" else "unknown"
-                findings = [{**f, "status": f.get("status", status if f.get("severity") == "error" else "info")}
+                findings = [{**f, "status": status if f.get("severity") == "error" else f.get("status", "info")}
                             for f in comparison["findings"]]
                 if status == "unknown":
                     findings.append({"status": "unknown", "message": "Geometry comparison could not be completed."})
@@ -376,8 +389,29 @@ def review(repo: Path, base_ref: str, head_ref: str, output: Path, profile: str 
             findings.extend({**f, "status": f.get("status", status if f.get("severity") == "error" else "info")}
                             for f in dfm["findings"])
             item["sides"].append({"side": "DFM", "artifacts": [], "findings": findings})
+        if skip_inventory:
+            inventory = check_inventory(Path("."), build_quantity, skip=True)
+        else:
+            bom_path = snapshot_path(root / "head", bom) if bom else root / "generated-bom.csv"
+            bom_error = None
+            if not bom and len(roots) != 1:
+                bom_error = "Automatic BOM export requires one resolved root schematic; provide --bom for other projects."
+            elif not bom and not supported:
+                bom_error = "Cannot export a BOM: KiCad 9 is unavailable."
+            elif not bom:
+                schematic = snapshot_path(root / "head", next(iter(roots)))
+                code, _ = run_tool(["kicad-cli", "sch", "export", "bom", "--fields",
+                                        "Reference,${QUANTITY},${DNP},DigiKey,Mouser", "--labels",
+                                        "Refs,Qty,DNP,DigiKey,Mouser", "--group-by", "Value,Footprint,DigiKey,Mouser",
+                                        "--string-delimiter", '"', "--exclude-dnp", "--output", str(bom_path), str(schematic)])
+                if code != 0 or not bom_path.is_file():
+                    bom_error = "KiCad could not export the schematic BOM."
+            inventory = ({"status": "unknown", "findings": [{"status": "unknown", "message": bom_error}]}
+                         if bom_error else check_inventory(bom_path, build_quantity))
+        result["inventory"] = inventory
         statuses = [f.get("status") for f in result["findings"]]
         statuses.extend(f.get("status") for item in result["files"] for side in item["sides"] for f in side["findings"])
+        statuses.append(inventory["status"])
         result["status"] = "fail" if "fail" in statuses else "unknown" if "unknown" in statuses else "pass"
         write_report(result, output)
         return result

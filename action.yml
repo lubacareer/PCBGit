@@ -1,0 +1,87 @@
+name: PCBGit review
+description: Review KiCad, STEP, Gerber, DFM and distributor stock in a self-hosted container
+inputs:
+  base:
+    description: Base commit; checkout must include full history
+    required: true
+  head:
+    description: Head commit
+    required: true
+  output:
+    description: Report directory relative to the workspace
+    default: pcbgit-report
+  bom:
+    description: Relative path to the exported KiCad CSV BOM
+    default: ''
+  build-quantity:
+    description: Number of boards to build
+    default: '1'
+  profile:
+    description: Optional DFM profile path
+    default: ''
+  image:
+    description: Optional trusted, prebuilt PCBGit image pinned by sha256 digest
+    default: ''
+  digikey-client-id:
+    description: DigiKey OAuth client ID
+    default: ''
+  digikey-client-secret:
+    description: DigiKey OAuth client secret
+    default: ''
+  digikey-access-token:
+    description: Optional DigiKey OAuth access token
+    default: ''
+  digikey-account-id:
+    description: Optional DigiKey account ID
+    default: ''
+  mouser-api-key:
+    description: Mouser search API key
+    default: ''
+runs:
+  using: composite
+  steps:
+    - name: Run PCBGit from the trusted action revision
+      shell: bash
+      env:
+        PCB_BASE: ${{ inputs.base }}
+        PCB_HEAD: ${{ inputs.head }}
+        PCB_OUTPUT: ${{ inputs.output }}
+        PCB_BOM: ${{ inputs.bom }}
+        PCB_BUILD_QUANTITY: ${{ inputs.build-quantity }}
+        PCB_PROFILE: ${{ inputs.profile }}
+        PCB_IMAGE: ${{ inputs.image }}
+        PCB_EVENT: ${{ github.event_name }}
+        PCB_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+        PCB_REPO: ${{ github.repository }}
+        DIGIKEY_CLIENT_ID: ${{ inputs.digikey-client-id }}
+        DIGIKEY_CLIENT_SECRET: ${{ inputs.digikey-client-secret }}
+        DIGIKEY_ACCESS_TOKEN: ${{ inputs.digikey-access-token }}
+        DIGIKEY_ACCOUNT_ID: ${{ inputs.digikey-account-id }}
+        MOUSER_API_KEY: ${{ inputs.mouser-api-key }}
+      run: |
+        set -euo pipefail
+        if [[ "$PCB_EVENT" == pull_request_target ]]; then
+          echo 'PCBGit refuses pull_request_target; use pull_request without secrets for forks.' >&2
+          exit 2
+        fi
+        if [[ -n "$PCB_IMAGE" ]]; then
+          if [[ ! "$PCB_IMAGE" =~ ^[a-zA-Z0-9][a-zA-Z0-9._:/-]*@sha256:[a-f0-9]{64}$ ]]; then
+            echo 'PCBGit image must be a trusted immutable sha256 reference.' >&2
+            exit 2
+          fi
+          docker pull "$PCB_IMAGE"
+          image="$PCB_IMAGE"
+        else
+          docker build -t pcbgit-action "$GITHUB_ACTION_PATH"
+          image=pcbgit-action
+        fi
+        args=(review --base "$PCB_BASE" --head "$PCB_HEAD" --output "$PCB_OUTPUT" --build-quantity "$PCB_BUILD_QUANTITY")
+        [[ -z "$PCB_BOM" ]] || args+=(--bom "$PCB_BOM")
+        [[ -z "$PCB_PROFILE" ]] || args+=(--profile "$PCB_PROFILE")
+        docker_env=()
+        if [[ "$PCB_EVENT" == pull_request && -n "$PCB_HEAD_REPO" && "$PCB_HEAD_REPO" == "$PCB_REPO" ]] || [[ "$PCB_EVENT" == push || "$PCB_EVENT" == workflow_dispatch ]]; then
+          docker_env=(-e DIGIKEY_CLIENT_ID -e DIGIKEY_CLIENT_SECRET -e DIGIKEY_ACCESS_TOKEN -e DIGIKEY_ACCOUNT_ID -e MOUSER_API_KEY)
+        else
+          args+=(--skip-inventory)
+        fi
+        docker run --rm --user "$(id -u):$(id -g)" -v "$GITHUB_WORKSPACE:/workspace" -w /workspace "${docker_env[@]}" "$image" "${args[@]}"

@@ -35,7 +35,7 @@ def test_review_includes_changed_gerber(tmp_path):
     (repo / "layer.gbr").write_text(GERBER.replace("X010000", "X020000"))
     git("commit", "-am", "after")
     with patch("pcbgit.review.run_tool", return_value=(0, "9.0.9")):
-        result = review(repo, base, "HEAD", tmp_path / "report")
+        result = review(repo, base, "HEAD", tmp_path / "report", skip_inventory=True)
     assert result["status"] == "pass"
     assert result["files"][0]["kind"] == "gerber"
     assert (tmp_path / "report" / result["files"][0]["sides"][0]["artifacts"][0]).is_file()
@@ -96,15 +96,15 @@ def test_review_propagates_step_uncertainty_without_escalating_other_warnings(tm
     unknown = {"code": "step_tolerances_unknown", "severity": "warning", "status": "unknown", "message": "Tolerances unknown"}
     comparison = {"kind": "step", "change": "changed", "status": "ok", "findings": [warning, unknown], "artifacts": []}
     with patch("pcbgit.review.run_tool", return_value=(0, "9.0.9")), patch("pcbgit.review.compare_files", return_value=comparison):
-        result = review(repo, base, "HEAD", tmp_path / "report")
-        assert main(["review", "--repo", str(repo), "--base", base, "--head", "HEAD", "--output", str(tmp_path / "cli-report")]) == 2
+        result = review(repo, base, "HEAD", tmp_path / "report", skip_inventory=True)
+        assert main(["review", "--repo", str(repo), "--base", base, "--head", "HEAD", "--output", str(tmp_path / "cli-report"), "--skip-inventory"]) == 2
     findings = result["files"][0]["sides"][0]["findings"]
     assert result["status"] == "unknown"
     assert [finding["status"] for finding in findings] == ["info", "unknown"]
     assert "Tolerances unknown" in (tmp_path / "report" / "index.html").read_text(encoding="utf-8")
     comparison["findings"] = [warning]
     with patch("pcbgit.review.run_tool", return_value=(0, "9.0.9")), patch("pcbgit.review.compare_files", return_value=comparison):
-        assert review(repo, base, "HEAD", tmp_path / "other-report")["status"] == "pass"
+        assert review(repo, base, "HEAD", tmp_path / "other-report", skip_inventory=True)["status"] == "pass"
 
 
 def test_gerber_render_and_absent_revision(tmp_path):

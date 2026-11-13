@@ -11,6 +11,7 @@ import re
 import subprocess
 import tempfile
 
+from .geometry import GERBER_EXTENSIONS, STEP_EXTENSIONS, compare_files
 from .sexpr import _parse
 
 
@@ -245,6 +246,8 @@ def write_report(result: dict, output: Path) -> None:
                     parts.append(f"<p><a href='{esc(artifact)}'>Download details</a></p>")
             for finding in side.get("findings", []):
                 parts.append(f"<p class='{esc(finding.get('status', ''))}'>{esc(finding.get('message', ''))}</p>")
+                if finding.get("evidence"):
+                    parts.append(f"<pre>{esc(json.dumps(finding['evidence'], indent=2, ensure_ascii=True))}</pre>")
             parts.append("</div>")
         parts.append("</div></section>")
     parts.append("<p><a href='report.json'>Machine-readable report</a></p></html>")
@@ -320,6 +323,21 @@ def review(repo: Path, base_ref: str, head_ref: str, output: Path) -> dict:
         changed = changed_files(repo, base_commit, head_commit)
         for name in changed:
             relative = PurePosixPath(name)
+            if relative.suffix.lower() in STEP_EXTENSIONS | GERBER_EXTENSIONS:
+                old = root / "base" / Path(*relative.parts)
+                new = root / "head" / Path(*relative.parts)
+                digest = hashlib.sha256(name.encode("utf-8", "surrogateescape")).hexdigest()[:16]
+                comparison = compare_files(old if old.is_file() else None, new if new.is_file() else None,
+                                           output / "assets" / digest / "comparison")
+                status = "pass" if comparison["status"] == "ok" else "unknown"
+                findings = [{**f, "status": f.get("status", status if f.get("severity") == "error" else "info")}
+                            for f in comparison["findings"]]
+                if status == "unknown":
+                    findings.append({"status": "unknown", "message": "Geometry comparison could not be completed."})
+                artifacts = [Path(p).relative_to(output).as_posix() for p in comparison["artifacts"]]
+                result["files"].append({"path": name, "kind": comparison["kind"], "change": comparison["change"],
+                                        "sides": [{"side": "comparison", "artifacts": artifacts, "findings": findings}]})
+                continue
             if relative.suffix.lower() not in (".kicad_pcb", ".kicad_sch"):
                 continue
             item = {"path": name, "sides": []}
